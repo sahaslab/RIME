@@ -1,0 +1,610 @@
+# Recipes emit all plausible plans from intrinsic clip analysis.
+# They do not depend on a user intent field.
+#
+# Common fields:
+# - `bindings`: names derived from analysis metadata and reused in the graph
+# - `when`: predicate gating recipe eligibility
+# - `weight_rules`: optional prior shaping based on analysis
+# - `graph`: declarative edit-graph template
+# - `chain_ref`: include a reusable motif
+recipes:
+  # Generic send-return ambience for non-drum targets in genres where obvious
+  # space is plausible.
+  - id: target_space_send_synced
+    description: Band-limited send-return ambience with tempo-synced delay.
+    tags:
+      - time_based
+      - delay
+      - synced_delay
+      - reverb
+      - send_return
+    weight: 0.8
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: drums
+        - neq:
+            path: bindings.target_family
+            value: other
+        - not:
+            contains_any:
+              path: metadata.analysis.genres
+              values:
+                - classical
+                - folk
+    weight_rules:
+      - name: space_more_common_on_vocals
+        action: multiply
+        multiplier: 1.2
+        when:
+          eq:
+            path: bindings.target_family
+            value: vocals
+      - name: space_more_common_in_pop_and_rock
+        action: multiply
+        multiplier: 1.1
+        when:
+          contains_any:
+            path: metadata.analysis.genres
+            values:
+              - pop
+              - rock
+              - electronic
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: send_return
+        name: target_space
+        source: target_stem
+        output: processed_stem
+        dry_level: 1.0
+        send_level:
+          sample: space.shared_send.send_level
+        return_level:
+          sample: space.shared_send.return_level
+        chain_ref: band_limited_space_send_synced
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Free-time variant of the same ambience pattern. This remains available but
+  # is intentionally less common than synced delay.
+  - id: target_space_send_free
+    description: Band-limited send-return ambience with free-time delay.
+    tags:
+      - time_based
+      - delay
+      - free_delay
+      - reverb
+      - send_return
+    weight: 0.35
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: drums
+        - neq:
+            path: bindings.target_family
+            value: other
+        - not:
+            contains_any:
+              path: metadata.analysis.genres
+              values:
+                - classical
+                - folk
+    weight_rules:
+      - name: free_delay_less_common_on_vocals
+        action: multiply
+        multiplier: 0.85
+        when:
+          eq:
+            path: bindings.target_family
+            value: vocals
+      - name: free_delay_more_common_in_ambient_electronic
+        action: multiply
+        multiplier: 1.2
+        when:
+          contains_any:
+            path: metadata.analysis.genres
+            values:
+              - ambient
+              - electronic
+              - lounge
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: send_return
+        name: target_space
+        source: target_stem
+        output: processed_stem
+        dry_level: 1.0
+        send_level:
+          sample: space.shared_send.send_level
+        return_level:
+          sample: space.shared_send.return_level
+        chain_ref: band_limited_space_send_free
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Fallback de-essing proxy using static EQ.
+  - id: vocal_sibilance_cleanup
+    description: Peak-cut based vocal de-essing fallback when sibilance is detected.
+    tags:
+      - cleanup
+      - eq
+      - eq_peak
+    weight: 1.0
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - eq:
+            path: bindings.target_family
+            value: vocals
+        - contains_any:
+            path: metadata.analysis.issues
+            values:
+              - sibilance
+              - hiss
+    graph:
+      - kind: separate
+        name: isolate_vocals
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - vocal_stem
+          - residual
+      - kind: chain
+        prefix: vocal_cleanup
+        order_profile: eq_cleanup
+        source: vocal_stem
+        output: processed_stem
+        steps:
+          - name: tame_sibilance
+            operator: apply_peak_filter
+            params:
+              cutoff_frequency_hz:
+                sample: cleanup.vocal_sibilance.cut_hz
+              gain_db:
+                sample: cleanup.vocal_sibilance.cut_db
+              q:
+                sample: cleanup.vocal_sibilance.q
+      - kind: mix
+        name: remix_vocals
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Parallel drum compression is modeled as a bus, not an insert.
+  - id: parallel_drum_compression
+    description: Parallel drum compression via send-return.
+    tags:
+      - dynamics
+      - compression
+      - send_return
+    weight: 0.95
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      eq:
+        path: bindings.target_family
+        value: drums
+    graph:
+      - kind: separate
+        name: isolate_drums
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - drum_stem
+          - residual
+      - kind: send_return
+        name: drum_parallel
+        source: drum_stem
+        output: processed_stem
+        dry_level: 1.0
+        send_level:
+          sample: drums.parallel_compression.send_level
+        return_level:
+          sample: drums.parallel_compression.return_level
+        chain_ref: parallel_compression_bus
+      - kind: mix
+        name: remix_drums
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Simple stem rebalance up.
+  - id: light_drum_distortion
+    description: Light drum saturation/distortion for audible drum color.
+    tags:
+      - distortion
+      - color
+    weight: 0.7
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      eq:
+        path: bindings.target_family
+        value: drums
+    graph:
+      - kind: separate
+        name: isolate_drums
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - drum_stem
+          - residual
+      - kind: chain
+        prefix: distorted_drums
+        order_profile: serial_fx
+        source: drum_stem
+        output: processed_stem
+        steps:
+          - name: light_saturation
+            operator: apply_distortion_effect
+            params:
+              drive_db:
+                sample: drums.distortion.drive_db
+      - kind: mix
+        name: remix_drums
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Simple stem rebalance up.
+  - id: make_target_louder
+    description: Stem-level gain increase for rebalancing.
+    tags:
+      - level
+      - gain
+    weight: 0.75
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: other
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: louder_target
+        source: target_stem
+        output: processed_stem
+        steps:
+          - name: gain_up
+            operator: apply_gain
+            params:
+              gain_db:
+                sample: balance.target_gain.up_db
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Simple stem rebalance down.
+  - id: make_target_quieter
+    description: Stem-level gain decrease for rebalancing.
+    tags:
+      - level
+      - gain
+    weight: 0.75
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: other
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: quieter_target
+        source: target_stem
+        output: processed_stem
+        steps:
+          - name: gain_down
+            operator: apply_gain
+            params:
+              gain_db:
+                sample: balance.target_gain.down_db
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Direct vocal control compression.
+  - id: vocal_control_compression
+    description: Standard vocal control compression for clips with vocals.
+    tags:
+      - dynamics
+      - compression
+    weight: 0.9
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      eq:
+        path: bindings.target_family
+        value: vocals
+    graph:
+      - kind: separate
+        name: isolate_vocals
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - vocal_stem
+          - residual
+      - kind: chain
+        prefix: vocal_control
+        source: vocal_stem
+        output: processed_stem
+        chain_ref: vocal_control_compression
+      - kind: mix
+        name: remix_vocals
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Harmony support path. Requested interval is optional and comes from analysis
+  # metadata if some upstream tool or rule sets it.
+  - id: vocal_harmony_support
+    description: Add a harmony stem, tuck it back, and band-limit it before remixing.
+    tags:
+      - pitch
+      - harmony
+      - send_return
+    weight: 0.45
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - eq:
+            path: bindings.target_family
+            value: vocals
+        - not:
+            contains_any:
+              path: metadata.analysis.genres
+              values:
+                - classical
+                - folk
+    graph:
+      - kind: separate
+        name: isolate_vocals
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - vocal_stem
+          - residual
+      - kind: send_return
+        name: harmony_bus
+        order_profile: harmony_aux
+        source: vocal_stem
+        output: processed_stem
+        dry_level: 1.0
+        send_level: 1.0
+        return_level: 1.0
+        steps:
+          - name: harmony
+            operator: apply_harmony_effect
+            params:
+              semitones:
+                coalesce:
+                  - ref: metadata.analysis.harmony_semitones
+                  - sample: vocals.harmony.intervals
+          - name: tuck_harmony
+            operator: apply_gain
+            params:
+              gain_db:
+                sample: vocals.harmony.backoff_db
+          - name: harmony_highpass
+            operator: apply_highpass_filter
+            params:
+              cutoff_frequency_hz:
+                sample: vocals.harmony.post_eq.highpass_hz
+          - name: harmony_lowpass
+            operator: apply_lowpass_filter
+            params:
+              cutoff_frequency_hz:
+                sample: vocals.harmony.post_eq.lowpass_hz
+      - kind: mix
+        name: remix_vocals
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Vintage tone approximation with the current EQ/filter operator set.
+  - id: retro_tilt
+    description: High-frequency shelf cut followed by a gentle lowpass for vintage tone shaping.
+    tags:
+      - eq
+      - eq_shelf
+      - eq_pass
+      - color
+    weight: 0.35
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - neq:
+            path: bindings.target_family
+            value: drums
+        - neq:
+            path: bindings.target_family
+            value: other
+        - not:
+            contains_any:
+              path: metadata.analysis.genres
+              values:
+                - classical
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: retro_target
+        source: target_stem
+        output: processed_stem
+        chain_ref: retro_tilt_eq
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Modulation texture for non-drum, non-classical targets.
+  - id: modulation_texture
+    description: Add chorus texture, mainly for non-drum targets.
+    tags:
+      - modulation
+      - movement
+    weight: 0.3
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+    when:
+      all:
+        - neq:
+            path: bindings.target_family
+            value: drums
+        - neq:
+            path: bindings.target_family
+            value: other
+        - not:
+            contains_any:
+              path: metadata.analysis.genres
+              values:
+                - classical
+                - folk
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: modulated_target
+        source: target_stem
+        output: processed_stem
+        chain_ref: modulation_texture
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+  # Mixture-level hum cleanup when hum is detected.
+  - id: hum_cleanup
+    description: Low-end cleanup for clips flagged with mains hum.
+    tags:
+      - cleanup
+      - eq
+      - eq_pass
+    weight: 0.95
+    when:
+      contains_any:
+        path: metadata.analysis.issues
+        values:
+          - hum
+    graph:
+      - kind: chain
+        prefix: hum_cleanup
+        order_profile: eq_cleanup
+        source: audio
+        output: final_audio
+        steps:
+          - name: highpass_hum
+            operator: apply_highpass_filter
+            params:
+              cutoff_frequency_hz:
+                sample: cleanup.hum.highpass_hz

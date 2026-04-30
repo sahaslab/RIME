@@ -1,0 +1,40 @@
+dataset:
+  name: medleydb
+
+  files:
+    metadata: medleydb-metadata.csv
+    audio_subdir: medleydb
+
+  allowed_types:
+    - all_instrument
+
+  target_families:
+    vocals: []
+    drums:
+      - drum set
+      - drum machine
+      - auxiliary percussion
+      - bass drum
+      - kick drum
+      - snare drum
+      - cymbal
+      - tambourine
+      - timpani
+      - tabla
+
+  target_stems:
+    drum set: drums
+    drum machine: drums
+    auxiliary percussion: percussion
+    bass drum: drums
+    kick drum: drums
+    snare drum: drums
+    cymbal: cymbals
+    tambourine: tambourine
+    timpani: timpani
+    tabla: tabla
+
+  family_priority:
+    vocals: 3.0
+    drums: 2.0
+    other: 1.0

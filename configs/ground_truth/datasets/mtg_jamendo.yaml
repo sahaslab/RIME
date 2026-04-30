@@ -1,0 +1,147 @@
+dataset:
+  name: mtg_jamendo
+
+  # Source file inside the filtered MTG-Jamendo metadata directory.
+  files:
+    metadata: jamendo_subsample_retagged.tsv
+
+  # MTG uses `domain---tag` labels in a tab-separated tag tail.
+  tags:
+    separator: "---"
+    domains:
+      instruments: instrument
+      genres: genre
+      mood_themes: mood/theme
+
+  # Explicit, auditable mapping from filtered MTG instrument tags to Demucs 6-source targets.
+  # Tags not listed here are rejected for ground-truth planning.
+  demucs_target_map:
+    acousticbassguitar: bass
+    acousticguitar: guitar
+    accordion: other
+    banjo: guitar
+    bass: bass
+    bassguitar: bass
+    beat: drums
+    beats: drums
+    bell: other
+    bells: other
+    bongo: drums
+    bongos: drums
+    brass: other
+    cajon: drums
+    cello: other
+    choir: vocals
+    choirs: vocals
+    classicalguitar: guitar
+    clavier: piano
+    clavichord: piano
+    computer: other
+    conga: drums
+    cowbell: drums
+    cvp509: piano
+    cymbal: drums
+    doublebass: bass
+    drum: drums
+    drummachine: drums
+    drums: drums
+    dunun: drums
+    electricguitar: guitar
+    electricguitars: guitar
+    electricpiano: piano
+    electronicorgan: piano
+    femaleleadvocals: vocals
+    femalevoice: vocals
+    flute: other
+    glockenspiel: other
+    guitar: guitar
+    guitarra: guitar
+    guitare: guitar
+    guitareelectrique: guitar
+    guitares: guitar
+    guitars: guitar
+    hammond: piano
+    harmonica: other
+    harp: other
+    harpsichord: piano
+    horn: other
+    horns: other
+    keyboard: piano
+    keyboards: piano
+    keys: piano
+    lapsteelguitar: guitar
+    malevoice: vocals
+    malevocals: vocals
+    mandolin: guitar
+    marimba: other
+    mellotron: other
+    orchestra: other
+    organ: piano
+    pad: other
+    pads: other
+    panflute: other
+    percussion: drums
+    percussions: drums
+    piano: piano
+    pipeorgan: piano
+    rhodes: piano
+    sampler: other
+    sax: other
+    saxophone: other
+    slideguitar: guitar
+    strings: other
+    string: other
+    synth: other
+    synthesizer: other
+    synthesizers: other
+    synths: other
+    synthetizer: other
+    synthe: other
+    tabla: drums
+    tambourine: drums
+    theremin: other
+    timpani: drums
+    trombone: other
+    trumpet: other
+    tuba: other
+    tubularbell: other
+    ukulele: guitar
+    vibraphone: other
+    viola: other
+    violin: other
+    violins: other
+    voice: vocals
+    vocal: vocals
+    woodwind: other
+    xylophone: other
+
+  # Family grouping controls which recipes and constraints can fire.
+  target_families:
+    vocals:
+      - vocals
+    drums:
+      - drums
+    bass:
+      - bass
+    guitar:
+      - guitar
+    # piano:
+    #   - piano
+
+  # Human-facing stem names used in prompts and plan output.
+  target_stems:
+    bass: bass
+    drums: drums
+    guitar: guitar
+    other: other
+    piano: piano
+    vocals: vocals
+
+  # Candidate ordering is purely heuristic and only affects output ordering.
+  family_priority:
+    vocals: 3.0
+    drums: 2.0
+    bass: 1.75
+    guitar: 1.5
+    piano: 1.25
+    other: 1.0
