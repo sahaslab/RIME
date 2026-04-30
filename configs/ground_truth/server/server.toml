@@ -1,0 +1,4 @@
+[server]
+separation_backend = "demucs"
+demucs_model = "htdemucs_6s"
+sam_model = "facebook/sam-audio-large"

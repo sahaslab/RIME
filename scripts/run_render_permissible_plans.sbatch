@@ -10,11 +10,11 @@
 
 set -euo pipefail
 
-REPO_ROOT=/dartfs-hpc/rc/home/f/f007krf/post-master
+REPO_ROOT=/dartfs/rc/lab/S/SinghN/projects/RIME
 cd "${REPO_ROOT}"
 
-PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/subsampled_plans.jsonl}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/generated-audio}"
+PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/retagged_subsampled_plans_100.jsonl}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio}"
 CONFIG_DIR="${CONFIG_DIR:-$REPO_ROOT/configs/ground_truth}"
 RENDER_SEED="${RENDER_SEED:-0}"
 LIMIT_ARG=()
