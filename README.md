@@ -1,4 +1,4 @@
-# Post-Master: A Reinforcement Learning Framework for end-to-end Music Post Production
+# RIME: Rule-Based Instructions for Music Editing
 
 ## Ground-Truth Pipeline
 
