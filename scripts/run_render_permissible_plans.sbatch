@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=pm-render
 #SBATCH --account=sahaslab-gpu
-#SBATCH --partition=l40s_nova
-#SBATCH --gpus=1
+#SBATCH --partition=standard
 #SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --output=logs/%x-%j.out
@@ -13,8 +12,8 @@ set -euo pipefail
 REPO_ROOT=/dartfs/rc/lab/S/SinghN/projects/RIME
 cd "${REPO_ROOT}"
 
-PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/retagged_subsampled_plans_100.jsonl}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio}"
+PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/retagged_subsample.jsonl}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio-full}"
 CONFIG_DIR="${CONFIG_DIR:-$REPO_ROOT/configs/ground_truth}"
 RENDER_SEED="${RENDER_SEED:-0}"
 LIMIT_ARG=()

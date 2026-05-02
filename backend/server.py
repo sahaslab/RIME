@@ -1,97 +1,50 @@
-import os
-import re
-import sys
-import time
-import json
-import shutil
-import hashlib
-import asyncio
-import logging
-import tomllib
-import contextlib
-from pathlib import Path
-from collections.abc import Mapping, Callable, Sequence
 import numpy as np
 import torch
-import soundfile as sf
-from typing import Any
+import torchaudio
+from typing import Optional, Union, Callable, Any, Dict, Annotated
+import time
+import sys
+import os
+import asyncio
+import tomllib
+import re
+from pydantic import Field
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DARTFS_CACHE_ROOT = Path("/dartfs/rc/lab/S/SinghN/noah/.cache")
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-sys.path.append(str(REPO_ROOT))
+os.environ["TORCH_HOME"] = "/dartfs/rc/lab/S/SinghN/noah/.cache/torch"
+torch.hub.set_dir(os.environ["TORCH_HOME"])
 
+from mcp.server.fastmcp import FastMCP
 
-def _post_master_cache_root() -> Path:
-    cache_root = os.environ.get("POST_MASTER_CACHE_DIR")
-    if cache_root:
-        return Path(cache_root).expanduser()
-    if DEFAULT_DARTFS_CACHE_ROOT.exists():
-        return DEFAULT_DARTFS_CACHE_ROOT
-    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
-    if xdg_cache_home:
-        return Path(xdg_cache_home).expanduser() / "post-master"
-    return Path.home() / ".cache" / "post-master"
-
-
-def _configure_torch_home() -> None:
-    torch_home = (
-        os.environ.get("POST_MASTER_TORCH_HOME")
-        or os.environ.get("TORCH_HOME")
-        or str(_post_master_cache_root() / "torch")
-    )
-    torch_home_path = Path(torch_home).expanduser()
-    torch_home_path.mkdir(parents=True, exist_ok=True)
-    os.environ["TORCH_HOME"] = str(torch_home_path)
-    torch.hub.set_dir(str(torch_home_path))
-
-
-def _huggingface_cache_dir() -> Path:
-    cache_dir = (
-        os.environ.get("POST_MASTER_HF_CACHE_DIR")
-        or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    )
-    if cache_dir:
-        return Path(cache_dir).expanduser()
-    hf_home = os.environ.get("HF_HOME")
-    if hf_home:
-        return Path(hf_home).expanduser() / "hub"
-    return _post_master_cache_root() / "huggingface" / "hub"
-
-
-def _skey_checkpoint_path() -> Path:
-    checkpoint_path = (
-        os.environ.get("POST_MASTER_SKEY_CHECKPOINT")
-        or os.environ.get("SKEY_CHECKPOINT")
-    )
-    if checkpoint_path:
-        return Path(checkpoint_path).expanduser()
-    return REPO_ROOT / "models" / "skey.pt"
-
-
-_configure_torch_home()
-
-import libraries.separation as separation_lib
-from libraries.pitch import autotune, generate_harmony, apply_pitch_shift
+from libraries.effects import (
+    apply_chorus,
+    apply_phaser,
+    apply_distortion,
+    apply_reverb,
+    apply_delay,
+    apply_compressor,
+    apply_limiter,
+    apply_deesser,
+)
 from libraries.mixing import (
-    apply_pan,
     apply_gain,
-    apply_lowpass,
     apply_highpass,
-    apply_lowshelf,
-    normalize_peak,
+    apply_lowpass,
     apply_highshelf,
-    apply_noisegate,
+    apply_lowshelf,
     apply_peakfilter,
+    apply_noisegate,
+    normalize_peak,
     apply_fade_in_out,
+    apply_pan,
     mix_stem_with_residual,
 )
-from libraries.effects import apply_delay, apply_chorus, apply_phaser, apply_reverb, apply_deesser, apply_limiter, apply_compressor, apply_distortion
-from ground_truth.runtime import RuntimePlanCompiler
 from libraries.separation import separate
-from audio_queue import AudioProcessingQueue
-from mcp.server.fastmcp import FastMCP
+
+from libraries.pitch import autotune, generate_harmony, apply_pitch_shift
 from skey.key_detection import load_checkpoint, load_model_components
+from audio_queue import AudioProcessingQueue
 
 # Initialize FastMCP server
 server = FastMCP("Audio Editing Server", "1.0.0")
@@ -105,14 +58,13 @@ pitch_hcqt = None
 pitch_chromanet = None
 pitch_crop_fn = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+separation_device = torch.device("cpu")
 processing_queue = AudioProcessingQueue()
 log_file = "server_status.log"
 DEFAULT_SERVER_CONFIG_PATH = os.environ.get(
     "POST_MASTER_SERVER_CONFIG",
-    "/dartfs-hpc/rc/home/t/f00814t/lab/projects/RIME/configs/ground_truth/server/server.toml",
+    os.path.join(os.path.dirname(__file__), "..", "zero_shot_agent.toml"),
 )
-MIN_DEMUCS_STEM_RMS = 1e-4
-MIN_DEMUCS_STEM_RMS_RATIO = 0.02
 MIXTURE_HINTS = (
     "mixture",
     "mix",
@@ -139,19 +91,6 @@ SINGLE_SOURCE_HINTS = (
     "drum track",
     "instrument track",
 )
-TARGET_SOURCE_HINTS = (
-    "vocals",
-    "vocal",
-    "drums",
-    "drum",
-    "bass",
-    "guitar",
-    "piano",
-    "keys",
-    "synth",
-    "lead",
-    "backing vocals",
-)
 REQUESTED_EDIT_HINTS = (
     "reverb",
     "delay",
@@ -175,21 +114,8 @@ REQUESTED_EDIT_HINTS = (
     "normalize",
     "noise gate",
 )
-SOURCE_CANONICAL = {
-    "vocal": "vocals",
-    "vocals": "vocals",
-    "backing vocals": "backing vocals",
-    "drum": "drums",
-    "drums": "drums",
-    "bass": "bass",
-    "guitar": "guitar",
-    "piano": "piano",
-    "keys": "piano",
-    "synth": "synth",
-    "lead": "lead",
-}
 EDIT_TOOL_ALIASES = (
-    ("pitch shift", "apply_pitch_shift_effect"),
+    # ("pitch shift", "apply_pitch_shift_effect"),
     ("noise gate", "apply_noisegate_tool"),
     ("de-esser", "apply_deesser_tool"),
     ("de-ess", "apply_deesser_tool"),
@@ -213,43 +139,133 @@ EDIT_TOOL_ALIASES = (
     ("boost", "apply_gain_tool"),
     ("gain", "apply_gain_tool"),
 )
-server_config: dict[str, Any] = {
+PLANNING_INPUT_TYPES = {"mixture", "single-source", "unknown"}
+CONJUNCTION_ONLY_RE = re.compile(r"^\s*(?:,|and|then|plus|after that|afterwards)?\s*$")
+DIRECT_OBJECT_STOP_WORDS = {
+    "using",
+    "with",
+    "while",
+    "then",
+    "after",
+    "before",
+    "but",
+    "so",
+    "because",
+    "if",
+    "when",
+    "until",
+}
+server_config: Dict[str, Any] = {
     "separation_backend": "demucs",
     "demucs_model": "htdemucs_6s",
     "sam_model": "facebook/sam-audio-large",
 }
-
-# Ground-truth rendering globals
-ground_truth_compiler = None
-ground_truth_compiler_dir = None
-ground_truth_last_audio_path = None
-ground_truth_last_audio_tensor = None
-ground_truth_last_sample_rate = None
-ground_truth_last_max_audio_seconds = None
-ground_truth_separation_cache = {}
-ground_truth_demucs_sources_cache = {}
-ground_truth_separation_cache_dir = None
-ground_truth_raw_separate = separation_lib.separate
+PEDALBOARD_PARAM_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "apply_chorus_effect": {
+        "rate_hz": {"minimum": 0.0, "maximum": 100.0},
+        "depth": {"minimum": 0.0, "maximum": 1.0},
+        "centre_delay_ms": {"minimum": 0.0, "maximum": 100.0},
+        "feedback": {"minimum": 0.0, "maximum": 1.0},
+        "mix": {"minimum": 0.0, "maximum": 1.0},
+    },
+    "apply_phaser_effect": {
+        "rate_hz": {"minimum": 0.0, "maximum": 100.0},
+        "depth": {"minimum": 0.0, "maximum": 1.0},
+        "centre_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "feedback": {"minimum": 0.0, "maximum": 1.0},
+        "mix": {"minimum": 0.0, "maximum": 1.0},
+    },
+    "apply_distortion_effect": {
+        "drive_db": {"minimum": 0.0, "maximum": 60.0},
+    },
+    # "apply_pitch_shift_effect": {
+    #     "semitones": {"minimum": -48.0, "maximum": 48.0},
+    # },
+    "apply_reverb_effect": {
+        "room_size": {"minimum": 0.0, "maximum": 1.0},
+        "damping": {"minimum": 0.0, "maximum": 1.0},
+        "wet_level": {"minimum": 0.0, "maximum": 1.0},
+        "dry_level": {"minimum": 0.0, "maximum": 1.0},
+        "width": {"minimum": 0.0, "maximum": 1.0},
+        "freeze_mode": {"minimum": 0.0, "maximum": 1.0},
+    },
+    "apply_delay_effect": {
+        "delay_seconds": {"minimum": 0.0, "maximum": 10.0},
+        "feedback": {"minimum": 0.0, "maximum": 1.0},
+        "mix": {"minimum": 0.0, "maximum": 1.0},
+    },
+    "apply_compressor_effect": {
+        "threshold_db": {"minimum": -120.0, "maximum": 0.0},
+        "ratio": {"minimum": 1.0, "maximum": 25.0},
+        "attack_ms": {"minimum": 0.01, "maximum": 500.0},
+        "release_ms": {"minimum": 1.0, "maximum": 5000.0},
+    },
+    "apply_limiter_effect": {
+        "threshold_db": {"minimum": -120.0, "maximum": 0.0},
+        "release_ms": {"minimum": 1.0, "maximum": 5000.0},
+    },
+    "apply_deesser_tool": {
+        "ess_highpass_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "ess_lowpass_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "threshold_db": {"minimum": -120.0, "maximum": 0.0},
+        "ratio": {"minimum": 1.0, "maximum": 25.0},
+        "attack_ms": {"minimum": 0.01, "maximum": 500.0},
+        "release_ms": {"minimum": 1.0, "maximum": 5000.0},
+        "relative_threshold_db": {"minimum": -60.0, "maximum": 24.0},
+        "max_reduction_db": {"minimum": 0.0, "maximum": 60.0},
+        "filter_order": {"minimum": 1, "maximum": 12},
+    },
+    "apply_gain_tool": {
+        "gain_db": {"minimum": -60.0, "maximum": 60.0},
+    },
+    "apply_highpass_filter_tool": {
+        "cutoff_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+    },
+    "apply_lowpass_filter_tool": {
+        "cutoff_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+    },
+    "apply_highshelf_filter_tool": {
+        "cutoff_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "gain_db": {"minimum": -24.0, "maximum": 24.0},
+        "q": {"minimum": 0.1, "maximum": 10.0},
+    },
+    "apply_lowshelf_filter_tool": {
+        "cutoff_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "gain_db": {"minimum": -24.0, "maximum": 24.0},
+        "q": {"minimum": 0.1, "maximum": 10.0},
+    },
+    "apply_peak_filter_tool": {
+        "cutoff_frequency_hz": {"minimum": 20.0, "maximum": 20000.0},
+        "gain_db": {"minimum": -24.0, "maximum": 24.0},
+        "q": {"minimum": 0.1, "maximum": 10.0},
+    },
+    "apply_noisegate_tool": {
+        "threshold_db": {"minimum": -120.0, "maximum": 0.0},
+        "ratio": {"minimum": 1.0, "maximum": 25.0},
+        "attack_ms": {"minimum": 0.01, "maximum": 500.0},
+        "release_ms": {"minimum": 1.0, "maximum": 5000.0},
+    },
+    "normalize_peak_tool": {
+        "target_peak": {"minimum": 0.0, "maximum": 1.0, "exclusive_minimum": True},
+    },
+    "apply_fade_in_out_tool": {
+        "fade_in_seconds": {"minimum": 0.0},
+        "fade_out_seconds": {"minimum": 0.0},
+    },
+    "apply_pan_tool": {
+        "pan": {"minimum": -1.0, "maximum": 1.0},
+    },
+    "apply_harmony": {
+        "semitones": {"minimum": -48.0, "maximum": 48.0},
+    },
+}
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
 
-def _redirect_stdout_loggers_to_stderr(*logger_names: str) -> None:
-    names = tuple(logger_names) or ("",)
-    for logger_name in names:
-        logger = logging.getLogger(logger_name)
-        for handler in logger.handlers:
-            stream = getattr(handler, "stream", None)
-            if stream is sys.stdout:
-                handler.stream = sys.stderr
-
-
-_redirect_stdout_loggers_to_stderr("", "sam_audio", "mcp", "mcp.server", "mcp.server.lowlevel.server")
-
-
-def load_server_config(config_path: str = DEFAULT_SERVER_CONFIG_PATH) -> dict[str, Any]:
+def load_server_config(config_path: str = DEFAULT_SERVER_CONFIG_PATH) -> Dict[str, Any]:
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Server config file not found: {config_path}")
 
@@ -280,38 +296,256 @@ server_config = load_server_config()
 
 
 def log_message(msg: str) -> None:
-    rendered = "[%s] %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
-    print(rendered, file=sys.stderr, flush=True)
     with open(log_file, "a") as f:
-        f.write("%s\n" % rendered)
-
-
-def _separation_runtime_ready() -> bool:
-    backend = str(server_config["separation_backend"]).lower()
-    if backend == "demucs":
-        return separation_model is not None
-    if backend == "sam_audio":
-        return separation_model is not None and separation_processor is not None
-    return False
+        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 
 def load_audio(file_path: str) -> tuple[np.ndarray, int]:
     """Load audio from file and return audio data and sample rate."""
     try:
-        audio_data, sr = sf.read(file_path, always_2d=True, dtype="float32")
-        return np.ascontiguousarray(audio_data.T), sr
+        audio_tensor, sr = torchaudio.load(file_path)
+        audio = audio_tensor.numpy()
+        return audio, sr
     except Exception as e:
         raise ValueError(f"Error loading audio file: {str(e)}")
 
 
 def load_audio_as_tensor(file_path: str) -> tuple[torch.Tensor, int]:
     """Load audio from file and return audio tensor and sample rate."""
-    audio, sr = load_audio(file_path)
-    return torch.from_numpy(audio.copy()), sr
+    try:
+        audio_tensor, sr = torchaudio.load(file_path)
+        return audio_tensor, sr
+    except Exception as e:
+        raise ValueError(f"Error loading audio file: {str(e)}")
+
+
+def _field_for_param(tool_name: str, param_name: str) -> Any:
+    spec = PEDALBOARD_PARAM_SPECS.get(tool_name, {}).get(param_name, {})
+    field_kwargs: Dict[str, Any] = {}
+
+    minimum = spec.get("minimum")
+    maximum = spec.get("maximum")
+    if minimum is not None:
+        if spec.get("exclusive_minimum"):
+            field_kwargs["gt"] = minimum
+        else:
+            field_kwargs["ge"] = minimum
+    if maximum is not None:
+        if spec.get("exclusive_maximum"):
+            field_kwargs["lt"] = maximum
+        else:
+            field_kwargs["le"] = maximum
+
+    return Field(**field_kwargs)
+
+
+def _build_validation_error(
+    tool_name: str,
+    *,
+    message: str,
+    invalid_params: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "error": message,
+        "error_type": "invalid_tool_arguments",
+        "tool_name": tool_name,
+        "invalid_params": invalid_params,
+        "retry_same_assignment": True,
+    }
+
+
+def _build_runtime_error(
+    tool_name: str,
+    *,
+    message: str,
+    error_type: str = "tool_execution_failed",
+) -> Dict[str, Any]:
+    return {
+        "error": message,
+        "error_type": error_type,
+        "tool_name": tool_name,
+        "retry_same_assignment": True,
+    }
+
+
+def _load_audio_sample_rate(audio_file: str) -> Optional[int]:
+    try:
+        metadata = torchaudio.info(audio_file)
+        sample_rate = getattr(metadata, "sample_rate", None)
+        if isinstance(sample_rate, int) and sample_rate > 0:
+            return sample_rate
+    except Exception:
+        pass
+
+    try:
+        _, sample_rate = load_audio(audio_file)
+        return sample_rate
+    except Exception:
+        return None
+
+
+def _validate_tool_arguments(
+    tool_name: str,
+    *,
+    audio_file: Optional[str],
+    arguments: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    invalid_params: list[Dict[str, Any]] = []
+    sample_rate: Optional[int] = None
+    nyquist: Optional[float] = None
+
+    for param_name, spec in PEDALBOARD_PARAM_SPECS.get(tool_name, {}).items():
+        if param_name not in arguments:
+            continue
+        value = arguments[param_name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            invalid_params.append(
+                {
+                    "name": param_name,
+                    "provided": value,
+                    "reason": "not_numeric",
+                }
+            )
+            continue
+
+        minimum = spec.get("minimum")
+        if minimum is not None:
+            if spec.get("exclusive_minimum"):
+                if not value > minimum:
+                    invalid_params.append(
+                        {
+                            "name": param_name,
+                            "provided": value,
+                            "reason": "below_or_equal_minimum",
+                            "minimum": minimum,
+                        }
+                    )
+                    continue
+            elif value < minimum:
+                invalid_params.append(
+                    {
+                        "name": param_name,
+                        "provided": value,
+                        "reason": "below_minimum",
+                        "minimum": minimum,
+                    }
+                )
+                continue
+
+        maximum = spec.get("maximum")
+        if maximum is not None:
+            if spec.get("exclusive_maximum"):
+                if not value < maximum:
+                    invalid_params.append(
+                        {
+                            "name": param_name,
+                            "provided": value,
+                            "reason": "above_or_equal_maximum",
+                            "maximum": maximum,
+                        }
+                    )
+                    continue
+            elif value > maximum:
+                invalid_params.append(
+                    {
+                        "name": param_name,
+                        "provided": value,
+                        "reason": "above_maximum",
+                        "maximum": maximum,
+                    }
+                )
+                continue
+
+    frequency_params = {"cutoff_frequency_hz", "centre_frequency_hz", "ess_lowpass_hz"}
+    if any(name in arguments for name in frequency_params) and audio_file:
+        sample_rate = _load_audio_sample_rate(audio_file)
+        if sample_rate:
+            nyquist = sample_rate / 2.0
+
+    if nyquist is not None:
+        for param_name in frequency_params:
+            value = arguments.get(param_name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= nyquist:
+                invalid_params.append(
+                    {
+                        "name": param_name,
+                        "provided": value,
+                        "reason": "must_be_below_nyquist",
+                        "maximum": nyquist,
+                    }
+                )
+
+    if tool_name == "apply_deesser_tool":
+        low = arguments.get("ess_highpass_hz")
+        high = arguments.get("ess_lowpass_hz")
+        if (
+            isinstance(low, (int, float))
+            and not isinstance(low, bool)
+            and isinstance(high, (int, float))
+            and not isinstance(high, bool)
+            and low >= high
+        ):
+            invalid_params.extend(
+                [
+                    {
+                        "name": "ess_highpass_hz",
+                        "provided": low,
+                        "reason": "must_be_lower_than_ess_lowpass_hz",
+                        "other_param": "ess_lowpass_hz",
+                        "other_value": high,
+                    },
+                    {
+                        "name": "ess_lowpass_hz",
+                        "provided": high,
+                        "reason": "must_be_higher_than_ess_highpass_hz",
+                        "other_param": "ess_highpass_hz",
+                        "other_value": low,
+                    },
+                ]
+            )
+
+    if invalid_params:
+        return _build_validation_error(
+            tool_name,
+            message=f"{tool_name} received invalid argument values.",
+            invalid_params=invalid_params,
+        )
+
+    return None
+
+
+def _run_validated_simple_effect(
+    *,
+    tool_name: str,
+    audio_file: str,
+    output_path: str,
+    processor: Callable[..., Union[np.ndarray, torch.Tensor]],
+    processor_args: tuple = (),
+    processor_kwargs: Optional[dict] = None,
+    validation_args: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    validation_error = _validate_tool_arguments(
+        tool_name,
+        audio_file=audio_file,
+        arguments=validation_args or {},
+    )
+    if validation_error is not None:
+        return validation_error
+
+    try:
+        return _process_simple_effect(
+            audio_file=audio_file,
+            output_path=output_path,
+            processor=processor,
+            processor_args=processor_args,
+            processor_kwargs=processor_kwargs,
+        )
+    except Exception as exc:
+        return _build_runtime_error(tool_name, message=str(exc))
 
 
 def save_audio(
-    audio_data: np.ndarray | torch.Tensor,
+    audio_data: Union[np.ndarray, torch.Tensor],
     sample_rate: int,
     output_path: str,
 ) -> str:
@@ -319,18 +553,19 @@ def save_audio(
     if not output_path or not isinstance(output_path, str):
         raise ValueError("output_path must be a non-empty string")
 
-    if isinstance(audio_data, torch.Tensor):
-        audio_array = audio_data.detach().cpu().float().numpy()
-    elif isinstance(audio_data, np.ndarray):
-        audio_array = np.asarray(audio_data, dtype=np.float32)
+    # Convert numpy to tensor if necessary
+    if isinstance(audio_data, np.ndarray):
+        audio_tensor = torch.from_numpy(audio_data)
+    elif isinstance(audio_data, torch.Tensor):
+        audio_tensor = audio_data.detach().cpu()
     else:
         raise ValueError("audio_data must be a numpy array or torch tensor")
 
-    if audio_array.ndim == 1:
-        audio_array = audio_array[np.newaxis, :]
+    # torchaudio.save requires a 2D tensor [channels, frames]
+    if audio_tensor.dim() == 1:
+        audio_tensor = audio_tensor.unsqueeze(0)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    sf.write(output_path, np.ascontiguousarray(audio_array.T), sample_rate)
+    torchaudio.save(output_path, audio_tensor, sample_rate)
     return output_path
 
 
@@ -338,10 +573,10 @@ def _process_simple_effect(
     *,
     audio_file: str,
     output_path: str,
-    processor: Callable[..., np.ndarray | torch.Tensor],
+    processor: Callable[..., Union[np.ndarray, torch.Tensor]],
     processor_args: tuple = (),
-    processor_kwargs: dict | None = None,
-) -> dict[str, Any]:
+    processor_kwargs: Optional[dict] = None,
+) -> Dict[str, Any]:
     """
     Shared handler for CPU/simple effects that operate on numpy audio.
     - loads audio (numpy)
@@ -357,15 +592,12 @@ def _process_simple_effect(
     return {"audio_path": final_path, "sample_rate": sr}
 
 
-def _guess_target_source(user_request: str) -> str | None:
-    request = user_request.lower()
-    for hint in TARGET_SOURCE_HINTS:
-        if hint in request:
-            return hint
-    return None
+def _guess_input_type(user_request: str, proposed_input_type: Optional[str] = None) -> str:
+    if isinstance(proposed_input_type, str):
+        normalized = proposed_input_type.strip().lower()
+        if normalized in PLANNING_INPUT_TYPES:
+            return normalized
 
-
-def _guess_input_type(user_request: str, target_source: str | None) -> str:
     request = user_request.lower()
     if any(hint in request for hint in SINGLE_SOURCE_HINTS):
         return "single-source"
@@ -380,70 +612,336 @@ def _collect_requested_edits(user_request: str) -> list[str]:
     return edits or ["requested processing"]
 
 
-def _canonicalize_target_source(text: str) -> str | None:
-    text_lower = text.lower()
-    for hint in sorted(TARGET_SOURCE_HINTS, key=len, reverse=True):
-        if hint in text_lower:
-            return SOURCE_CANONICAL.get(hint, hint)
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+_INVALID_PARAM_VALUE = object()
+
+
+def _normalize_param_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        normalized = _normalize_whitespace(value)
+        return normalized if normalized else _INVALID_PARAM_VALUE
+    if isinstance(value, list):
+        normalized_items = []
+        for item in value:
+            normalized_item = _normalize_param_value(item)
+            if normalized_item is _INVALID_PARAM_VALUE:
+                continue
+            normalized_items.append(normalized_item)
+        return normalized_items
+    if isinstance(value, dict):
+        normalized_dict: Dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            normalized_key = _normalize_whitespace(key)
+            if not normalized_key:
+                continue
+            normalized_item = _normalize_param_value(item)
+            if normalized_item is _INVALID_PARAM_VALUE:
+                continue
+            normalized_dict[normalized_key] = normalized_item
+        return normalized_dict
+    return _INVALID_PARAM_VALUE
+
+
+def _normalize_assignment_params(params: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(params, dict):
+        return None
+
+    normalized_params: Dict[str, Any] = {}
+    for key, value in params.items():
+        if not isinstance(key, str):
+            continue
+        normalized_key = _normalize_whitespace(key)
+        if not normalized_key:
+            continue
+        normalized_value = _normalize_param_value(value)
+        if normalized_value is _INVALID_PARAM_VALUE:
+            continue
+        normalized_params[normalized_key] = normalized_value
+
+    return normalized_params or None
+
+
+def _map_effect_phrase_to_tool(effect_phrase: Optional[str]) -> Optional[str]:
+    if not isinstance(effect_phrase, str):
+        return None
+    effect_text = effect_phrase.lower()
+    for alias, tool_name in EDIT_TOOL_ALIASES:
+        if alias in effect_text:
+            return tool_name
     return None
 
 
-def _extract_requested_operations(user_request: str) -> list[dict[str, str | None]]:
+def _resolve_tool_name_against_available_tools(
+    tool_name: Optional[str],
+    available_tool_names: Optional[list[str]],
+) -> Optional[str]:
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return None
+    if not available_tool_names:
+        return tool_name.strip()
+
+    stripped_name = tool_name.strip()
+    return stripped_name if stripped_name in available_tool_names else None
+
+
+def _sentence_end(text: str, start: int) -> int:
+    sentence_end = len(text)
+    for delimiter in ".;!?":
+        candidate_end = text.find(delimiter, start)
+        if candidate_end != -1:
+            sentence_end = min(sentence_end, candidate_end)
+    return sentence_end
+
+
+def _clean_source_phrase(text: str) -> Optional[str]:
+    cleaned = _normalize_whitespace(text.strip(" ,.;:!?"))
+    cleaned = re.sub(r"^(?:to|on|onto|for|in)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:the|this|that|these|those|my|our|your|their|a|an)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+(?:and|then|plus)\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" ,.;:!?")
+    if cleaned.lower() in {"and", "then", "plus"}:
+        return None
+    return cleaned or None
+
+
+def _extract_prepositional_target(
+    request_text: str,
+    effect_end: int,
+    next_effect_start: int,
+) -> Optional[str]:
+    text_after_effect = request_text[effect_end:]
+    match = re.search(r"\b(?:to|on|onto|for|in)\b", text_after_effect)
+    if match is None:
+        return None
+
+    target_start = effect_end + match.end()
+    target_end = min(_sentence_end(request_text, effect_end), next_effect_start)
+    raw_target = request_text[target_start:target_end]
+    return _clean_source_phrase(raw_target)
+
+
+def _extract_direct_object_target(
+    request_text: str,
+    effect_end: int,
+    next_effect_start: int,
+) -> Optional[str]:
+    target_end = min(_sentence_end(request_text, effect_end), next_effect_start)
+    remainder = request_text[effect_end:target_end]
+    cleaned = _normalize_whitespace(remainder)
+    if not cleaned:
+        return None
+
+    cleaned = re.sub(
+        r"^(?:to|on|onto|for|in)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not cleaned:
+        return None
+
+    tokens = cleaned.split()
+    collected: list[str] = []
+    for token in tokens:
+        token_lower = token.lower().strip(",.;:!?")
+        if token_lower in {"and", "plus"} and not collected:
+            break
+        if token_lower in DIRECT_OBJECT_STOP_WORDS:
+            break
+        if token_lower in {"and", "plus"} and collected:
+            break
+        collected.append(token)
+
+    if not collected:
+        return None
+
+    return _clean_source_phrase(" ".join(collected))
+
+
+def _extract_requested_assignments(user_request: str) -> list[Dict[str, Any]]:
     request_lower = user_request.lower()
-    target_mentions = [
-        (match.start(), SOURCE_CANONICAL.get(hint, hint))
-        for hint in sorted(TARGET_SOURCE_HINTS, key=len, reverse=True)
-        for match in re.finditer(re.escape(hint), request_lower)
-    ]
-    target_mentions.sort(key=lambda item: item[0])
+    effect_mentions: list[Dict[str, Any]] = []
 
-    unique_targets = []
-    for _, target in target_mentions:
-        if target not in unique_targets:
-            unique_targets.append(target)
-
-    operations: list[dict[str, str | None]] = []
-    seen_pairs = set()
     for alias, tool_name in EDIT_TOOL_ALIASES:
         for match in re.finditer(re.escape(alias), request_lower):
-            sentence_end = len(request_lower)
-            for delimiter in ".;!?":
-                candidate_end = request_lower.find(delimiter, match.end())
-                if candidate_end != -1:
-                    sentence_end = min(sentence_end, candidate_end)
-
-            target_source = None
-            for target_pos, target in target_mentions:
-                if match.end() <= target_pos < sentence_end:
-                    target_source = target
-                    break
-
-            if target_source is None and len(unique_targets) == 1:
-                target_source = unique_targets[0]
-
-            pair_key = (match.start(), tool_name, target_source)
-            if pair_key in seen_pairs:
-                continue
-            seen_pairs.add(pair_key)
-            operations.append(
+            effect_mentions.append(
                 {
                     "position": match.start(),
-                    "alias": alias,
-                    "tool": tool_name,
-                    "target": target_source,
+                    "match_end": match.end(),
+                    "effect_phrase": match.group(0),
+                    "tool_name": tool_name,
                 }
             )
 
-    operations.sort(key=lambda item: int(item["position"]))
-    return operations
+    effect_mentions.sort(key=lambda item: int(item["position"]))
+    if not effect_mentions:
+        return []
+
+    assignments: list[Dict[str, Any]] = []
+    for index, mention in enumerate(effect_mentions):
+        next_effect_start = len(request_lower)
+        if index + 1 < len(effect_mentions):
+            next_effect_start = int(effect_mentions[index + 1]["position"])
+
+        source_phrase = _extract_prepositional_target(
+            user_request,
+            int(mention["match_end"]),
+            next_effect_start,
+        )
+        if source_phrase is None:
+            source_phrase = _extract_direct_object_target(
+                user_request,
+                int(mention["match_end"]),
+                next_effect_start,
+            )
+
+        assignments.append(
+            {
+                "position": int(mention["position"]),
+                "effect_phrase": str(mention["effect_phrase"]),
+                "tool_name": str(mention["tool_name"]),
+                "source_phrase": source_phrase,
+            }
+        )
+
+    for index, assignment in enumerate(assignments):
+        if assignment["source_phrase"] is not None:
+            continue
+        if index + 1 >= len(assignments):
+            continue
+        between = request_lower[
+            int(effect_mentions[index]["match_end"]) : int(effect_mentions[index + 1]["position"])
+        ]
+        next_source = assignments[index + 1]["source_phrase"]
+        if next_source is not None and CONJUNCTION_ONLY_RE.match(between):
+            assignment["source_phrase"] = next_source
+
+    for index, assignment in enumerate(assignments):
+        if assignment["source_phrase"] is not None:
+            continue
+        if index == 0:
+            continue
+        previous_source = assignments[index - 1]["source_phrase"]
+        between = request_lower[
+            int(effect_mentions[index - 1]["match_end"]) : int(effect_mentions[index]["position"])
+        ]
+        if previous_source is not None and CONJUNCTION_ONLY_RE.match(between):
+            assignment["source_phrase"] = previous_source
+
+    deduped: list[Dict[str, Any]] = []
+    seen_keys = set()
+    for assignment in assignments:
+        dedupe_key = (
+            assignment["position"],
+            assignment["tool_name"],
+            assignment["source_phrase"],
+        )
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        deduped.append(assignment)
+
+    return deduped
+
+
+def _normalize_assignments(
+    assignments: Optional[list[Dict[str, Any]]],
+    user_request: str,
+    available_tool_names: Optional[list[str]] = None,
+) -> list[Dict[str, Any]]:
+    normalized: list[Dict[str, Any]] = []
+    if isinstance(assignments, list):
+        for assignment in assignments:
+            if not isinstance(assignment, dict):
+                continue
+
+            effect_phrase = assignment.get("effect_phrase")
+            tool_name = assignment.get("tool_name")
+            source_phrase = assignment.get("source_phrase")
+            params = _normalize_assignment_params(assignment.get("params"))
+
+            if not isinstance(effect_phrase, str) or not effect_phrase.strip():
+                continue
+            effect_phrase = _normalize_whitespace(effect_phrase)
+
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                resolved_tool_name = _resolve_tool_name_against_available_tools(
+                    _map_effect_phrase_to_tool(effect_phrase),
+                    available_tool_names,
+                )
+            else:
+                resolved_tool_name = _resolve_tool_name_against_available_tools(
+                    tool_name, available_tool_names
+                )
+            if not isinstance(resolved_tool_name, str) or not resolved_tool_name.strip():
+                continue
+
+            entry: Dict[str, Any] = {
+                "effect_phrase": effect_phrase,
+                "tool_name": resolved_tool_name.strip(),
+            }
+
+            if isinstance(source_phrase, str):
+                cleaned_source = _clean_source_phrase(source_phrase)
+                if cleaned_source:
+                    entry["source_phrase"] = cleaned_source
+            if params:
+                entry["params"] = params
+
+            normalized.append(entry)
+
+    if normalized:
+        return normalized
+
+    fallback_assignments = _extract_requested_assignments(user_request)
+    fallback_normalized: list[Dict[str, Any]] = []
+    for assignment in fallback_assignments:
+        effect_phrase = assignment.get("effect_phrase")
+        if not isinstance(effect_phrase, str) or not effect_phrase.strip():
+            continue
+        resolved_tool_name = _resolve_tool_name_against_available_tools(
+            assignment.get("tool_name"),
+            available_tool_names,
+        )
+        if not isinstance(resolved_tool_name, str) or not resolved_tool_name.strip():
+            continue
+
+        entry: Dict[str, Any] = {
+            "effect_phrase": effect_phrase.strip(),
+            "tool_name": resolved_tool_name.strip(),
+        }
+        source_phrase = assignment.get("source_phrase")
+        if isinstance(source_phrase, str):
+            cleaned_source = _clean_source_phrase(source_phrase)
+            if cleaned_source:
+                entry["source_phrase"] = cleaned_source
+        fallback_normalized.append(entry)
+
+    return fallback_normalized
 
 
 def _group_operations_by_target(
-    operations: list[dict[str, str | None]],
-) -> list[dict[str, Any]]:
-    groups: list[dict[str, Any]] = []
+    operations: list[Dict[str, str]],
+) -> list[Dict[str, Any]]:
+    groups: list[Dict[str, Any]] = []
     for operation in operations:
-        target = operation.get("target")
+        target = operation.get("source_phrase")
         if groups and groups[-1]["target"] == target:
             groups[-1]["operations"].append(operation)
             continue
@@ -451,12 +949,14 @@ def _group_operations_by_target(
     return groups
 
 
-def _build_plan_text(user_request: str) -> str:
-    target_source = _guess_target_source(user_request)
-    input_type = _guess_input_type(user_request, target_source)
+def _build_plan_text(
+    user_request: str,
+    *,
+    input_type: str,
+    assignments: list[Dict[str, str]],
+) -> str:
     requested_edits = ", ".join(_collect_requested_edits(user_request))
-    operations = _extract_requested_operations(user_request)
-    operation_groups = _group_operations_by_target(operations)
+    operation_groups = _group_operations_by_target(assignments)
 
     steps = [
         "1. Listen to the current audio and confirm whether it is truly a full mix or already an isolated source before committing to separation.",
@@ -470,12 +970,12 @@ def _build_plan_text(user_request: str) -> str:
 
             if group_target:
                 steps.append(
-                    f"{step_number}. Likely tool: separate_audio(audio_file=CURRENT_AUDIO, description=\"{group_target}\", return_both=true) to isolate the target before processing."
+                    f"{step_number}. Keep the binding exact: only process {group_target} for this branch. Likely tool: separate_audio(audio_file=CURRENT_AUDIO, description=\"{group_target}\", return_both=true)."
                 )
                 step_number += 1
                 for operation in group_operations:
                     steps.append(
-                        f"{step_number}. Likely tool: {operation['tool']}(audio_file=STEM_PATH, output_path=REQUEST_DIR + \"/...\") for the {group_target} stem."
+                        f"{step_number}. Likely tool: {operation['tool_name']}(audio_file=STEM_PATH, output_path=REQUEST_DIR + \"/...\") so {operation['effect_phrase']} stays attached to {group_target}."
                     )
                     step_number += 1
                 steps.append(
@@ -485,7 +985,7 @@ def _build_plan_text(user_request: str) -> str:
             else:
                 for operation in group_operations:
                     steps.append(
-                        f"{step_number}. Likely tool: {operation['tool']}(audio_file=CURRENT_AUDIO, output_path=REQUEST_DIR + \"/...\") directly on the current mix."
+                        f"{step_number}. Likely tool: {operation['tool_name']}(audio_file=CURRENT_AUDIO, output_path=REQUEST_DIR + \"/...\") directly on the current audio."
                     )
                     step_number += 1
 
@@ -495,11 +995,13 @@ def _build_plan_text(user_request: str) -> str:
     elif input_type == "unknown":
         steps.extend(
             [
-                "2. Do not assume this is a mixture just because the request names a source like vocals or bass.",
-                "3. If listening confirms a full mix, use separate_audio for each targeted source, apply the matching effect tools to STEM_PATH, then use mix_sources after each source-specific edit.",
-                "4. If listening confirms an isolated source, apply the matching effect tools directly to CURRENT_AUDIO in sequence without separation.",
-                "5. After each edit, re-listen and deviate from this plan whenever the latest audio suggests a better sequence or parameter choice.",
-                "6. Finish with return_audio once the strongest result matches the request.",
+                "2. Do not assume this is a mixture just because the request mentions a source phrase.",
+                "3. Preserve the planned source-to-effect bindings exactly unless listening clearly proves they were misread.",
+                "4. If listening confirms a full mix, handle each source-targeted assignment sequentially: separate_audio for that source phrase, apply the matching effect tool to STEM_PATH, then mix_sources before moving to the next assignment.",
+                "5. If listening confirms an isolated source, apply the matching effect tools directly to CURRENT_AUDIO in sequence without separation.",
+                "6. If multiple assignments target different sources, finish one separation/process/mix cycle before starting the next one.",
+                "7. After each edit, re-listen and deviate from this plan whenever the latest audio suggests a better sequence or parameter choice.",
+                "8. Finish with return_audio once the strongest result matches the request.",
             ]
         )
     else:
@@ -507,9 +1009,15 @@ def _build_plan_text(user_request: str) -> str:
         if operation_groups:
             for group in operation_groups:
                 for operation in group["operations"]:
-                    steps.append(
-                        f"{step_number}. Likely tool: {operation['tool']}(audio_file=CURRENT_AUDIO, output_path=REQUEST_DIR + \"/...\") directly on the isolated source."
-                    )
+                    target_phrase = operation.get("source_phrase")
+                    if target_phrase:
+                        steps.append(
+                            f"{step_number}. Preserve the binding {operation['effect_phrase']} -> {target_phrase} and likely use {operation['tool_name']}(audio_file=CURRENT_AUDIO, output_path=REQUEST_DIR + \"/...\") directly on the isolated source."
+                        )
+                    else:
+                        steps.append(
+                            f"{step_number}. Likely tool: {operation['tool_name']}(audio_file=CURRENT_AUDIO, output_path=REQUEST_DIR + \"/...\") directly on the isolated source."
+                        )
                     step_number += 1
         else:
             steps.append(
@@ -523,18 +1031,56 @@ def _build_plan_text(user_request: str) -> str:
     return "\n".join(steps)
 
 
-@server.tool()
-def plan_edit_sequence(
+def _build_fallback_plan_payload(
     user_request: str,
-    audio_file: str | None = None,
+    audio_file: Optional[str],
+    input_type: Optional[str],
+    assignments: Optional[list[Dict[str, Any]]],
+    plan: Optional[str],
+    available_tool_names: Optional[list[str]] = None,
 ) -> dict:
-    """Create an advisory natural-language edit plan before running audio edits."""
+    normalized_input_type = _guess_input_type(user_request, input_type)
+    normalized_assignments = _normalize_assignments(
+        assignments, user_request, available_tool_names
+    )
+    normalized_plan = (
+        plan.strip()
+        if isinstance(plan, str) and plan.strip()
+        else _build_plan_text(
+            user_request,
+            input_type=normalized_input_type,
+            assignments=normalized_assignments,
+        )
+    )
+
     return {
-        "plan": _build_plan_text(user_request),
+        "plan": normalized_plan,
+        "assignments": normalized_assignments,
+        "input_type": normalized_input_type,
         "user_request": user_request,
         "audio_file": audio_file,
         "advisory_only": True,
     }
+
+
+@server.tool()
+def plan_edit_sequence(
+    user_request: str,
+    audio_file: Optional[str] = None,
+    input_type: Optional[str] = None,
+    assignments: Optional[list[Dict[str, Any]]] = None,
+    plan: Optional[str] = None,
+    available_tool_names: Optional[list[str]] = None,
+) -> dict:
+    """Create an advisory edit plan. Prefer passing input_type, assignments, and plan generated from the user request; assignments should use the user's exact source phrases when possible and may include advisory params."""
+    return _build_fallback_plan_payload(
+        user_request=user_request,
+        audio_file=audio_file,
+        input_type=input_type,
+        assignments=assignments,
+        plan=plan,
+        available_tool_names=available_tool_names,
+    )
 
 
 # ============================================================================
@@ -543,16 +1089,19 @@ def plan_edit_sequence(
 
 
 async def initialize_separation_models():
+    global separation_model, separation_processor
+    if separation_model is not None:
+        return
+
     if not processing_queue.is_running:
         await processing_queue.start()
 
-    global separation_model, separation_processor
+    if separation_model is not None:
+        return
+
     separation_backend = str(server_config["separation_backend"]).lower()
 
     if separation_backend == "demucs":
-        if separation_model is not None:
-            log_message("Separation model already initialized with Demucs.")
-            return
         try:
             from demucs.pretrained import get_model
         except ImportError as exc:
@@ -561,16 +1110,12 @@ async def initialize_separation_models():
             ) from exc
 
         model_name = str(server_config["demucs_model"])
-        log_message("Loading Demucs separation model (%s) on %s." % (model_name, device))
-        separation_model = get_model(name=model_name).to(device).eval()
+        separation_model = get_model(name=model_name).to(separation_device).eval()
         separation_processor = None
-        log_message("Separation model initialized with Demucs (%s)." % model_name)
+        log_message(f"Separation model initialized with Demucs ({model_name}).")
         return
 
     if separation_backend == "sam_audio":
-        if separation_model is not None and separation_processor is not None:
-            log_message("Separation model already initialized with SAM Audio.")
-            return
         try:
             from sam_audio import SAMAudio, SAMAudioProcessor
             from sam_audio.model.config import SAMAudioConfig
@@ -579,40 +1124,30 @@ async def initialize_separation_models():
                 "SAM Audio is not installed. Install the `sam_audio` package to use separation."
             ) from exc
 
-        cache_dir = _huggingface_cache_dir()
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = "/dartfs/rc/lab/S/SinghN/noah/.cache/huggingface/hub"
         cfg = SAMAudioConfig(visual_ranker=None)
         model_name = str(server_config["sam_model"])
-        log_message("Loading SAM Audio separation model (%s) on %s." % (model_name, device))
-        if device.type == "cuda":
-            torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        else:
-            torch_dtype = torch.float32
-
-        with contextlib.redirect_stdout(sys.stderr):
-            separation_model = (
-                SAMAudio.from_pretrained(
-                    model_name,
-                    low_cpu_mem_usage=True,
-                    torch_dtype=torch_dtype,
-                    use_safetensors=True,
-                    cache_dir=str(cache_dir),
-                    config=cfg,
-                )
-                .to(device)
-                .eval()
-            )
-            separation_processor = SAMAudioProcessor.from_pretrained(
+        separation_model = (
+            SAMAudio.from_pretrained(
                 model_name,
-                cache_dir=str(cache_dir),
+                low_cpu_mem_usage=True,
+                torch_dtype="auto",
+                device_map="auto",
+                use_safetensors=True,
+                cache_dir=cache_dir,
+                config=cfg,
             )
-        log_message("Separation model initialized with SAM Audio (%s)." % model_name)
+            .to(device)
+            .eval()
+        )
+        separation_processor = SAMAudioProcessor.from_pretrained(model_name)
+        log_message(f"Separation model initialized with SAM Audio ({model_name}).")
         return
 
-    raise ValueError(
-        f"Unsupported separation_backend '{server_config['separation_backend']}'. "
-        "Expected 'demucs' or 'sam_audio'."
-    )
+        raise ValueError(
+            f"Unsupported separation_backend '{server_config['separation_backend']}'. "
+            "Expected 'demucs' or 'sam_audio'."
+        )
 
 
 def _separate_audio_logic(
@@ -626,10 +1161,11 @@ def _separate_audio_logic(
         raise ValueError("Separation model not initialized.")
 
     audio_tensor, sr = load_audio_as_tensor(audio_file)
+    
     stem, residual = separate(
         separation_model,
         separation_processor,
-        device,
+        separation_device,
         audio_tensor,
         description,
         sample_rate=sr,
@@ -679,18 +1215,28 @@ async def separate_audio(
 def apply_chorus_effect(
     audio_file: str,
     output_path: str,
-    rate_hz: float = 1.0,
-    depth: float = 0.25,
-    centre_delay_ms: float = 7.0,
-    feedback: float = 0.0,
-    mix: float = 0.5,
+    rate_hz: Annotated[float, _field_for_param("apply_chorus_effect", "rate_hz")],
+    depth: Annotated[float, _field_for_param("apply_chorus_effect", "depth")],
+    centre_delay_ms: Annotated[
+        float, _field_for_param("apply_chorus_effect", "centre_delay_ms")
+    ],
+    feedback: Annotated[float, _field_for_param("apply_chorus_effect", "feedback")],
+    mix: Annotated[float, _field_for_param("apply_chorus_effect", "mix")],
 ) -> dict:
     """Apply chorus effect to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_chorus_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_chorus,
         processor_args=(rate_hz, depth, centre_delay_ms, feedback, mix),
+        validation_args={
+            "rate_hz": rate_hz,
+            "depth": depth,
+            "centre_delay_ms": centre_delay_ms,
+            "feedback": feedback,
+            "mix": mix,
+        },
     )
 
 
@@ -698,18 +1244,28 @@ def apply_chorus_effect(
 def apply_phaser_effect(
     audio_file: str,
     output_path: str,
-    rate_hz: float = 1.0,
-    depth: float = 0.5,
-    centre_frequency_hz: float = 1300.0,
-    feedback: float = 0.0,
-    mix: float = 0.5,
+    rate_hz: Annotated[float, _field_for_param("apply_phaser_effect", "rate_hz")],
+    depth: Annotated[float, _field_for_param("apply_phaser_effect", "depth")],
+    centre_frequency_hz: Annotated[
+        float, _field_for_param("apply_phaser_effect", "centre_frequency_hz")
+    ],
+    feedback: Annotated[float, _field_for_param("apply_phaser_effect", "feedback")],
+    mix: Annotated[float, _field_for_param("apply_phaser_effect", "mix")],
 ) -> dict:
     """Apply phaser effect to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_phaser_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_phaser,
         processor_args=(rate_hz, depth, centre_frequency_hz, feedback, mix),
+        validation_args={
+            "rate_hz": rate_hz,
+            "depth": depth,
+            "centre_frequency_hz": centre_frequency_hz,
+            "feedback": feedback,
+            "mix": mix,
+        },
     )
 
 
@@ -717,49 +1273,68 @@ def apply_phaser_effect(
 def apply_distortion_effect(
     audio_file: str,
     output_path: str,
-    drive_db: float = 25.0,
+    drive_db: Annotated[
+        float, _field_for_param("apply_distortion_effect", "drive_db")
+    ],
 ) -> dict:
     """Apply distortion effect to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_distortion_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_distortion,
         processor_args=(drive_db,),
+        validation_args={"drive_db": drive_db},
     )
 
 
-@server.tool()
-def apply_pitch_shift_effect(
-    audio_file: str,
-    output_path: str,
-    semitones: float = 0.0,
-) -> dict:
-    """Apply a constant pitch shift to audio."""
-    return _process_simple_effect(
-        audio_file=audio_file,
-        output_path=output_path,
-        processor=apply_pitch_shift,
-        processor_args=(semitones,),
-    )
+# @server.tool()
+# def apply_pitch_shift_effect(
+#     audio_file: str,
+#     output_path: str,
+#     semitones: Annotated[
+#         float, _field_for_param("apply_pitch_shift_effect", "semitones")
+#     ],
+# ) -> dict:
+#     """Apply a constant pitch shift to audio."""
+#     return _run_validated_simple_effect(
+#         tool_name="apply_pitch_shift_effect",
+#         audio_file=audio_file,
+#         output_path=output_path,
+#         processor=apply_pitch_shift,
+#         processor_args=(semitones,),
+#         validation_args={"semitones": semitones},
+#     )
 
 
 @server.tool()
 def apply_reverb_effect(
     audio_file: str,
     output_path: str,
-    room_size: float = 0.5,
-    damping: float = 0.5,
-    wet_level: float = 0.33,
-    dry_level: float = 0.4,
-    width: float = 1.0,
-    freeze_mode: float = 0.0,
+    room_size: Annotated[float, _field_for_param("apply_reverb_effect", "room_size")],
+    damping: Annotated[float, _field_for_param("apply_reverb_effect", "damping")],
+    wet_level: Annotated[float, _field_for_param("apply_reverb_effect", "wet_level")],
+    dry_level: Annotated[float, _field_for_param("apply_reverb_effect", "dry_level")],
+    width: Annotated[float, _field_for_param("apply_reverb_effect", "width")],
+    freeze_mode: Annotated[
+        float, _field_for_param("apply_reverb_effect", "freeze_mode")
+    ],
 ) -> dict:
     """Apply reverb effect to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_reverb_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_reverb,
         processor_args=(room_size, damping, wet_level, dry_level, width, freeze_mode),
+        validation_args={
+            "room_size": room_size,
+            "damping": damping,
+            "wet_level": wet_level,
+            "dry_level": dry_level,
+            "width": width,
+            "freeze_mode": freeze_mode,
+        },
     )
 
 
@@ -767,16 +1342,24 @@ def apply_reverb_effect(
 def apply_delay_effect(
     audio_file: str,
     output_path: str,
-    delay_seconds: float = 0.5,
-    feedback: float = 0.0,
-    mix: float = 0.5,
+    delay_seconds: Annotated[
+        float, _field_for_param("apply_delay_effect", "delay_seconds")
+    ],
+    feedback: Annotated[float, _field_for_param("apply_delay_effect", "feedback")],
+    mix: Annotated[float, _field_for_param("apply_delay_effect", "mix")],
 ) -> dict:
     """Apply delay effect to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_delay_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_delay,
         processor_args=(delay_seconds, feedback, mix),
+        validation_args={
+            "delay_seconds": delay_seconds,
+            "feedback": feedback,
+            "mix": mix,
+        },
     )
 
 
@@ -784,17 +1367,30 @@ def apply_delay_effect(
 def apply_compressor_effect(
     audio_file: str,
     output_path: str,
-    threshold_db: float = 0.0,
-    ratio: float = 1.0,
-    attack_ms: float = 1.0,
-    release_ms: float = 10.0,
+    threshold_db: Annotated[
+        float, _field_for_param("apply_compressor_effect", "threshold_db")
+    ],
+    ratio: Annotated[float, _field_for_param("apply_compressor_effect", "ratio")],
+    attack_ms: Annotated[
+        float, _field_for_param("apply_compressor_effect", "attack_ms")
+    ],
+    release_ms: Annotated[
+        float, _field_for_param("apply_compressor_effect", "release_ms")
+    ],
 ) -> dict:
     """Apply compressor to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_compressor_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_compressor,
         processor_args=(threshold_db, ratio, attack_ms, release_ms),
+        validation_args={
+            "threshold_db": threshold_db,
+            "ratio": ratio,
+            "attack_ms": attack_ms,
+            "release_ms": release_ms,
+        },
     )
 
 
@@ -802,15 +1398,24 @@ def apply_compressor_effect(
 def apply_limiter_effect(
     audio_file: str,
     output_path: str,
-    threshold_db: float = -10.0,
-    release_ms: float = 100.0,
+    threshold_db: Annotated[
+        float, _field_for_param("apply_limiter_effect", "threshold_db")
+    ],
+    release_ms: Annotated[
+        float, _field_for_param("apply_limiter_effect", "release_ms")
+    ],
 ) -> dict:
     """Apply limiter to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_limiter_effect",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_limiter,
         processor_args=(threshold_db, release_ms),
+        validation_args={
+            "threshold_db": threshold_db,
+            "release_ms": release_ms,
+        },
     )
 
 
@@ -818,26 +1423,56 @@ def apply_limiter_effect(
 def apply_deesser_tool(
     audio_file: str,
     output_path: str,
-    ess_highpass_hz: float = 5000.0,
-    ess_lowpass_hz: float = 10000.0,
-    threshold_db: float = -30.0,
-    ratio: float = 8.0,
-    attack_ms: float = 1.0,
-    release_ms: float = 60.0,
+    ess_highpass_hz: Annotated[
+        float, _field_for_param("apply_deesser_tool", "ess_highpass_hz")
+    ],
+    ess_lowpass_hz: Annotated[
+        float, _field_for_param("apply_deesser_tool", "ess_lowpass_hz")
+    ],
+    threshold_db: Annotated[
+        float, _field_for_param("apply_deesser_tool", "threshold_db")
+    ],
+    ratio: Annotated[float, _field_for_param("apply_deesser_tool", "ratio")],
+    attack_ms: Annotated[float, _field_for_param("apply_deesser_tool", "attack_ms")],
+    release_ms: Annotated[
+        float, _field_for_param("apply_deesser_tool", "release_ms")
+    ],
+    relative_threshold_db: Annotated[
+        float, _field_for_param("apply_deesser_tool", "relative_threshold_db")
+    ],
+    max_reduction_db: Annotated[
+        float, _field_for_param("apply_deesser_tool", "max_reduction_db")
+    ],
+    filter_order: Annotated[int, _field_for_param("apply_deesser_tool", "filter_order")],
 ) -> dict:
     """Apply a simple split-band de-esser to reduce sibilance."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_deesser_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_deesser,
-        processor_args=(
-            ess_highpass_hz,
-            ess_lowpass_hz,
-            threshold_db,
-            ratio,
-            attack_ms,
-            release_ms,
-        ),
+        processor_kwargs={
+            "ess_low_hz": ess_highpass_hz,
+            "ess_high_hz": ess_lowpass_hz,
+            "threshold_db": threshold_db,
+            "ratio": ratio,
+            "attack_ms": attack_ms,
+            "release_ms": release_ms,
+            "relative_threshold_db": relative_threshold_db,
+            "max_reduction_db": max_reduction_db,
+            "filter_order": filter_order,
+        },
+        validation_args={
+            "ess_highpass_hz": ess_highpass_hz,
+            "ess_lowpass_hz": ess_lowpass_hz,
+            "threshold_db": threshold_db,
+            "ratio": ratio,
+            "attack_ms": attack_ms,
+            "release_ms": release_ms,
+            "relative_threshold_db": relative_threshold_db,
+            "max_reduction_db": max_reduction_db,
+            "filter_order": filter_order,
+        },
     )
 
 
@@ -850,14 +1485,16 @@ def apply_deesser_tool(
 def apply_gain_tool(
     audio_file: str,
     output_path: str,
-    gain_db: float = 1.0,
+    gain_db: Annotated[float, _field_for_param("apply_gain_tool", "gain_db")],
 ) -> dict:
     """Apply gain to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_gain_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_gain,
         processor_args=(gain_db,),
+        validation_args={"gain_db": gain_db},
     )
 
 
@@ -865,14 +1502,18 @@ def apply_gain_tool(
 def apply_highpass_filter_tool(
     audio_file: str,
     output_path: str,
-    cutoff_frequency_hz: float = 50.0,
+    cutoff_frequency_hz: Annotated[
+        float, _field_for_param("apply_highpass_filter_tool", "cutoff_frequency_hz")
+    ],
 ) -> dict:
     """Apply highpass filter to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_highpass_filter_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_highpass,
         processor_args=(cutoff_frequency_hz,),
+        validation_args={"cutoff_frequency_hz": cutoff_frequency_hz},
     )
 
 
@@ -880,14 +1521,18 @@ def apply_highpass_filter_tool(
 def apply_lowpass_filter_tool(
     audio_file: str,
     output_path: str,
-    cutoff_frequency_hz: float = 50.0,
+    cutoff_frequency_hz: Annotated[
+        float, _field_for_param("apply_lowpass_filter_tool", "cutoff_frequency_hz")
+    ],
 ) -> dict:
     """Apply lowpass filter to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_lowpass_filter_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_lowpass,
         processor_args=(cutoff_frequency_hz,),
+        validation_args={"cutoff_frequency_hz": cutoff_frequency_hz},
     )
 
 
@@ -895,16 +1540,26 @@ def apply_lowpass_filter_tool(
 def apply_highshelf_filter_tool(
     audio_file: str,
     output_path: str,
-    cutoff_frequency_hz: float = 440.0,
-    gain_db: float = 0.0,
-    q: float = 0.7071067690849304,
+    cutoff_frequency_hz: Annotated[
+        float, _field_for_param("apply_highshelf_filter_tool", "cutoff_frequency_hz")
+    ],
+    gain_db: Annotated[
+        float, _field_for_param("apply_highshelf_filter_tool", "gain_db")
+    ],
+    q: Annotated[float, _field_for_param("apply_highshelf_filter_tool", "q")],
 ) -> dict:
     """Apply high shelf filter to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_highshelf_filter_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_highshelf,
         processor_args=(cutoff_frequency_hz, gain_db, q),
+        validation_args={
+            "cutoff_frequency_hz": cutoff_frequency_hz,
+            "gain_db": gain_db,
+            "q": q,
+        },
     )
 
 
@@ -912,16 +1567,26 @@ def apply_highshelf_filter_tool(
 def apply_lowshelf_filter_tool(
     audio_file: str,
     output_path: str,
-    cutoff_frequency_hz: float = 440.0,
-    gain_db: float = 0.0,
-    q: float = 0.7071067690849304,
+    cutoff_frequency_hz: Annotated[
+        float, _field_for_param("apply_lowshelf_filter_tool", "cutoff_frequency_hz")
+    ],
+    gain_db: Annotated[
+        float, _field_for_param("apply_lowshelf_filter_tool", "gain_db")
+    ],
+    q: Annotated[float, _field_for_param("apply_lowshelf_filter_tool", "q")],
 ) -> dict:
     """Apply low shelf filter to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_lowshelf_filter_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_lowshelf,
         processor_args=(cutoff_frequency_hz, gain_db, q),
+        validation_args={
+            "cutoff_frequency_hz": cutoff_frequency_hz,
+            "gain_db": gain_db,
+            "q": q,
+        },
     )
 
 
@@ -929,16 +1594,26 @@ def apply_lowshelf_filter_tool(
 def apply_peak_filter_tool(
     audio_file: str,
     output_path: str,
-    cutoff_frequency_hz: float = 440.0,
-    gain_db: float = 0.0,
-    q: float = 0.7071067690849304,
+    cutoff_frequency_hz: Annotated[
+        float, _field_for_param("apply_peak_filter_tool", "cutoff_frequency_hz")
+    ],
+    gain_db: Annotated[
+        float, _field_for_param("apply_peak_filter_tool", "gain_db")
+    ],
+    q: Annotated[float, _field_for_param("apply_peak_filter_tool", "q")],
 ) -> dict:
     """Apply peak filter (parametric EQ) to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_peak_filter_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_peakfilter,
         processor_args=(cutoff_frequency_hz, gain_db, q),
+        validation_args={
+            "cutoff_frequency_hz": cutoff_frequency_hz,
+            "gain_db": gain_db,
+            "q": q,
+        },
     )
 
 
@@ -946,17 +1621,28 @@ def apply_peak_filter_tool(
 def apply_noisegate_tool(
     audio_file: str,
     output_path: str,
-    threshold_db: float = -100.0,
-    ratio: float = 10.0,
-    attack_ms: float = 1.0,
-    release_ms: float = 100.0,
+    threshold_db: Annotated[
+        float, _field_for_param("apply_noisegate_tool", "threshold_db")
+    ],
+    ratio: Annotated[float, _field_for_param("apply_noisegate_tool", "ratio")],
+    attack_ms: Annotated[float, _field_for_param("apply_noisegate_tool", "attack_ms")],
+    release_ms: Annotated[
+        float, _field_for_param("apply_noisegate_tool", "release_ms")
+    ],
 ) -> dict:
     """Apply noise gate to audio."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_noisegate_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_noisegate,
         processor_args=(threshold_db, ratio, attack_ms, release_ms),
+        validation_args={
+            "threshold_db": threshold_db,
+            "ratio": ratio,
+            "attack_ms": attack_ms,
+            "release_ms": release_ms,
+        },
     )
 
 
@@ -964,14 +1650,18 @@ def apply_noisegate_tool(
 def normalize_peak_tool(
     audio_file: str,
     output_path: str,
-    target_peak: float = 0.95,
+    target_peak: Annotated[
+        float, _field_for_param("normalize_peak_tool", "target_peak")
+    ],
 ) -> dict:
     """Scale audio so the peak sample reaches the requested headroom target."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="normalize_peak_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=normalize_peak,
         processor_args=(target_peak,),
+        validation_args={"target_peak": target_peak},
     )
 
 
@@ -979,15 +1669,24 @@ def normalize_peak_tool(
 def apply_fade_in_out_tool(
     audio_file: str,
     output_path: str,
-    fade_in_seconds: float = 0.01,
-    fade_out_seconds: float = 0.01,
+    fade_in_seconds: Annotated[
+        float, _field_for_param("apply_fade_in_out_tool", "fade_in_seconds")
+    ],
+    fade_out_seconds: Annotated[
+        float, _field_for_param("apply_fade_in_out_tool", "fade_out_seconds")
+    ],
 ) -> dict:
     """Apply linear fade-in and fade-out to the provided audio file."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_fade_in_out_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_fade_in_out,
         processor_args=(fade_in_seconds, fade_out_seconds),
+        validation_args={
+            "fade_in_seconds": fade_in_seconds,
+            "fade_out_seconds": fade_out_seconds,
+        },
     )
 
 
@@ -995,14 +1694,16 @@ def apply_fade_in_out_tool(
 def apply_pan_tool(
     audio_file: str,
     output_path: str,
-    pan: float = 0.0,
+    pan: Annotated[float, _field_for_param("apply_pan_tool", "pan")],
 ) -> dict:
     """Apply constant-power stereo panning. Negative is left, positive is right."""
-    return _process_simple_effect(
+    return _run_validated_simple_effect(
+        tool_name="apply_pan_tool",
         audio_file=audio_file,
         output_path=output_path,
         processor=apply_pan,
         processor_args=(pan,),
+        validation_args={"pan": pan},
     )
 
 
@@ -1033,24 +1734,24 @@ def mix_sources(
 
 
 async def initialize_pitch_models():
+    global pitch_hcqt, pitch_chromanet, pitch_crop_fn
+    if pitch_hcqt is not None:
+        return
+
     if not processing_queue.is_running:
         await processing_queue.start()
-    global pitch_hcqt, pitch_chromanet, pitch_crop_fn
-    if not any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
-        log_message("Pitch models already initialized.")
+
+    if pitch_hcqt is not None:
         return
-    checkpoint_path = _skey_checkpoint_path()
-    log_message("Loading pitch models from %s on %s." % (checkpoint_path, device))
-    with contextlib.redirect_stdout(sys.stderr):
-        ckpt = load_checkpoint(str(checkpoint_path))
-        pitch_hcqt, pitch_chromanet, pitch_crop_fn = load_model_components(ckpt, device)
+    ckpt = load_checkpoint("models/skey.pt")
+    pitch_hcqt, pitch_chromanet, pitch_crop_fn = load_model_components(ckpt, device)
     log_message("Pitch models initialized.")
 
 
 def _autotune_logic(
     audio_file: str,
-    key: str | None,
-    mode: str | None,
+    key: Optional[str],
+    mode: Optional[str],
     output_path: str,
 ):
     audio_tensor, sr = load_audio_as_tensor(audio_file)
@@ -1072,8 +1773,8 @@ def _autotune_logic(
 def _harmony_logic(
     audio_file: str,
     semitones: float,
-    key: str | None,
-    mode: str | None,
+    key: Optional[str],
+    mode: Optional[str],
     output_path: str,
 ):
     audio_tensor, sr = load_audio_as_tensor(audio_file)
@@ -1097,8 +1798,8 @@ def _harmony_logic(
 async def apply_autotune(
     audio_file: str,
     output_path: str,
-    key: str | None = None,
-    mode: str | None = None,
+    key: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> dict:
     """Quantize input vocals to a key. If key/mode omitted, they will be inferred."""
     if any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
@@ -1116,12 +1817,19 @@ async def apply_autotune(
 @server.tool()
 async def apply_harmony(
     audio_file: str,
-    semitones: float,
+    semitones: Annotated[float, _field_for_param("apply_harmony", "semitones")],
     output_path: str,
-    key: str | None = None,
-    mode: str | None = None,
+    key: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> dict:
     """Generate a harmony at a specified semitone distance; returns harmony-only."""
+    validation_error = _validate_tool_arguments(
+        "apply_harmony",
+        audio_file=audio_file,
+        arguments={"semitones": semitones},
+    )
+    if validation_error is not None:
+        return validation_error
     if any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
         await initialize_pitch_models()
 
@@ -1132,567 +1840,6 @@ async def apply_harmony(
         key=key,
         mode=mode,
         output_path=output_path,
-    )
-
-
-# ============================================================================
-# GROUND-TRUTH RENDERING
-# ============================================================================
-
-
-def _ground_truth_config_dir(config_dir: str | None) -> Path:
-    if config_dir:
-        return Path(config_dir).expanduser().resolve()
-    return (Path(__file__).resolve().parents[1] / "configs" / "ground_truth").resolve()
-
-
-def _ground_truth_compiler_for(config_dir: str | None) -> RuntimePlanCompiler:
-    global ground_truth_compiler, ground_truth_compiler_dir
-    resolved = str(_ground_truth_config_dir(config_dir))
-    if ground_truth_compiler is None or ground_truth_compiler_dir != resolved:
-        ground_truth_compiler = RuntimePlanCompiler.from_directory(resolved)
-        ground_truth_compiler_dir = resolved
-    return ground_truth_compiler
-
-
-def _ensure_ground_truth_audio(
-    audio_file: str,
-    max_audio_seconds: float | None = None,
-) -> tuple[torch.Tensor, int]:
-    global ground_truth_last_audio_path
-    global ground_truth_last_audio_tensor
-    global ground_truth_last_sample_rate
-    global ground_truth_last_max_audio_seconds
-    global ground_truth_separation_cache
-    global ground_truth_demucs_sources_cache
-
-    resolved = str(Path(audio_file).expanduser().resolve())
-    normalized_max_audio_seconds = (
-        None
-        if max_audio_seconds is None or float(max_audio_seconds) <= 0.0
-        else float(max_audio_seconds)
-    )
-    if (
-        ground_truth_last_audio_path == resolved
-        and ground_truth_last_max_audio_seconds == normalized_max_audio_seconds
-        and ground_truth_last_audio_tensor is not None
-        and ground_truth_last_sample_rate is not None
-    ):
-        return ground_truth_last_audio_tensor, ground_truth_last_sample_rate
-
-    audio_tensor, sample_rate = load_audio_as_tensor(resolved)
-    if normalized_max_audio_seconds is not None:
-        max_samples = int(normalized_max_audio_seconds * sample_rate)
-        if max_samples > 0 and audio_tensor.shape[-1] > max_samples:
-            audio_tensor = audio_tensor[..., :max_samples].contiguous()
-    ground_truth_last_audio_path = resolved
-    ground_truth_last_audio_tensor = audio_tensor
-    ground_truth_last_sample_rate = sample_rate
-    ground_truth_last_max_audio_seconds = normalized_max_audio_seconds
-    ground_truth_separation_cache = {}
-    ground_truth_demucs_sources_cache = {}
-    return audio_tensor, sample_rate
-
-
-def _set_ground_truth_separation_cache_dir(cache_dir: str | None) -> None:
-    global ground_truth_separation_cache_dir
-    if cache_dir is None or str(cache_dir).strip() == "":
-        ground_truth_separation_cache_dir = None
-        return
-    resolved = Path(cache_dir).expanduser().resolve()
-    resolved.mkdir(parents=True, exist_ok=True)
-    ground_truth_separation_cache_dir = resolved
-
-
-def _ground_truth_cache_owner(audio: torch.Tensor) -> str:
-    if ground_truth_last_audio_tensor is audio and ground_truth_last_audio_path is not None:
-        return str(ground_truth_last_audio_path)
-    return "tensor:%d" % id(audio)
-
-
-def _ground_truth_disk_cache_path(
-    *,
-    prefix: str,
-    audio: torch.Tensor,
-    description: str | None,
-    sr: int | None,
-) -> Path | None:
-    if ground_truth_separation_cache_dir is None:
-        return None
-    if ground_truth_last_audio_tensor is not audio or ground_truth_last_audio_path is None:
-        return None
-
-    audio_path = Path(ground_truth_last_audio_path)
-    audio_stat = audio_path.stat()
-    payload = {
-        "audio_path": str(audio_path),
-        "audio_size": audio_stat.st_size,
-        "audio_mtime_ns": audio_stat.st_mtime_ns,
-        "description": description,
-        "sample_rate": sr,
-        "max_audio_seconds": ground_truth_last_max_audio_seconds,
-        "separation_backend": server_config.get("separation_backend"),
-        "demucs_model": server_config.get("demucs_model"),
-        "demucs_overlap": float(os.environ.get("DEMUCS_OVERLAP", "0.5")),
-        "sam_model": server_config.get("sam_model"),
-        "prefix": prefix,
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-    return ground_truth_separation_cache_dir / prefix / ("%s.pt" % digest)
-
-
-def _clone_source_map(source_map: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    return {
-        str(source_name): source_audio.detach().cpu().clone()
-        for source_name, source_audio in source_map.items()
-    }
-
-
-def _sum_sources_except(
-    source_map: Mapping[str, torch.Tensor],
-    target_source: str,
-) -> torch.Tensor:
-    residual_sources = [
-        source_audio
-        for source_name, source_audio in source_map.items()
-        if source_name != target_source
-    ]
-    return torch.stack(residual_sources, dim=0).sum(dim=0)
-
-
-def _sum_sources(source_map: Mapping[str, torch.Tensor]) -> torch.Tensor:
-    source_iter = iter(source_map.values())
-    mixture = next(source_iter).detach().cpu().float().clone()
-    for source_audio in source_iter:
-        mixture.add_(source_audio.detach().cpu().float())
-    return mixture
-
-
-def _audio_rms(audio: torch.Tensor) -> float:
-    audio_cpu = audio.detach().cpu().float()
-    return float(torch.sqrt(torch.mean(audio_cpu * audio_cpu)).item())
-
-
-def _assert_active_demucs_source(
-    source_map: Mapping[str, torch.Tensor],
-    target_source: str,
-) -> None:
-    started_at = time.perf_counter()
-    log_message("Demucs activity check start | target_source=%s" % target_source)
-    source_rms = _audio_rms(source_map[target_source])
-    log_message("Demucs activity check source RMS | target_source=%s | rms=%.6f" % (target_source, source_rms))
-    mixture_rms = _audio_rms(_sum_sources(source_map))
-    rms_ratio = source_rms / max(mixture_rms, MIN_DEMUCS_STEM_RMS)
-    log_message(
-        "Demucs activity check done | target_source=%s | rms=%.6f | mixture_rms=%.6f | rms_ratio=%.6f | elapsed=%.1fs"
-        % (
-            target_source,
-            source_rms,
-            mixture_rms,
-            rms_ratio,
-            time.perf_counter() - started_at,
-        )
-    )
-    if source_rms < MIN_DEMUCS_STEM_RMS or rms_ratio < MIN_DEMUCS_STEM_RMS_RATIO:
-        raise ValueError(
-            "Demucs target '%s' is below activity threshold: rms=%.6f rms_ratio=%.6f"
-            % (target_source, source_rms, rms_ratio)
-        )
-
-
-def _ground_truth_cached_demucs_sources(
-    model: Any,
-    device: torch.device,
-    audio: torch.Tensor,
-    sr: int | None,
-) -> dict[str, torch.Tensor]:
-    cache_owner = _ground_truth_cache_owner(audio)
-    cache_key = (str(cache_owner), "demucs_sources", str(sr), str(server_config.get("demucs_model")))
-    if cache_key not in ground_truth_demucs_sources_cache:
-        disk_cache_path = _ground_truth_disk_cache_path(
-            prefix="demucs_sources",
-            audio=audio,
-            description=None,
-            sr=sr,
-        )
-        if disk_cache_path is not None and disk_cache_path.exists():
-            log_message("Demucs source cache hit | path=%s" % disk_cache_path)
-            payload = torch.load(disk_cache_path, map_location="cpu")
-            source_map = _clone_source_map(payload["sources"])
-        else:
-            log_message(
-                "Demucs source cache miss | owner=%s | sr=%s | samples=%d | cache_path=%s"
-                % (
-                    cache_owner,
-                    sr,
-                    audio.shape[-1],
-                    disk_cache_path,
-                )
-            )
-            source_map = separation_lib.separate_demucs_sources(model, device, audio, sr)
-            source_map = _clone_source_map(source_map)
-            if disk_cache_path is not None:
-                disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save({"sources": source_map}, disk_cache_path)
-                log_message("Demucs source cache written | path=%s" % disk_cache_path)
-        ground_truth_demucs_sources_cache[cache_key] = source_map
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-    else:
-        log_message("Demucs source memory cache hit | owner=%s | sr=%s" % (cache_owner, sr))
-    return _clone_source_map(ground_truth_demucs_sources_cache[cache_key])
-
-
-def _ground_truth_cached_separate(
-    model: Any,
-    processor: Any,
-    device: torch.device,
-    audio: torch.Tensor,
-    description: str,
-    sr: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if hasattr(model, "sources"):
-        source_map = _ground_truth_cached_demucs_sources(model, device, audio, sr)
-        target_source = separation_lib.canonicalize_demucs_description(
-            description,
-            list(source_map.keys()),
-        )
-        log_message("Selecting Demucs target | description=%s | target_source=%s" % (description, target_source))
-        _assert_active_demucs_source(source_map, target_source)
-        stem = source_map[target_source]
-        residual = _sum_sources_except(source_map, target_source)
-        return stem.clone(), residual.clone()
-
-    cache_owner = _ground_truth_cache_owner(audio)
-    cache_key = (str(cache_owner), str(description), str(sr))
-    if cache_key not in ground_truth_separation_cache:
-        disk_cache_path = _ground_truth_disk_cache_path(
-            prefix="separations",
-            audio=audio,
-            description=description,
-            sr=sr,
-        )
-        if disk_cache_path is not None and disk_cache_path.exists():
-            log_message("Separation cache hit | description=%s | path=%s" % (description, disk_cache_path))
-            payload = torch.load(disk_cache_path, map_location="cpu")
-            stem = payload["stem"]
-            residual = payload["residual"]
-        else:
-            log_message(
-                "Separation cache miss | description=%s | sr=%s | samples=%d | cache_path=%s"
-                % (description, sr, audio.shape[-1], disk_cache_path)
-            )
-            stem, residual = ground_truth_raw_separate(model, processor, device, audio, description, sr=sr)
-            if disk_cache_path is not None:
-                disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(
-                    {
-                        "stem": stem.detach().cpu().clone(),
-                        "residual": residual.detach().cpu().clone(),
-                    },
-                    disk_cache_path,
-                )
-                log_message("Separation cache written | description=%s | path=%s" % (description, disk_cache_path))
-        ground_truth_separation_cache[cache_key] = (
-            stem.detach().cpu().clone(),
-            residual.detach().cpu().clone(),
-        )
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-    else:
-        log_message("Separation memory cache hit | description=%s | sr=%s" % (description, sr))
-    stem, residual = ground_truth_separation_cache[cache_key]
-    return stem.clone(), residual.clone()
-
-
-def _patch_ground_truth_runtime() -> None:
-    separation_lib.separate = _ground_truth_cached_separate
-
-
-def _graph_uses_separation(graph_spec: Sequence[Mapping[str, Any]]) -> bool:
-    return any(block.get("kind") == "separate" for block in graph_spec)
-
-
-def _graph_uses_pitch(graph_spec: Sequence[Mapping[str, Any]]) -> bool:
-    pitch_ops = {"apply_autotune", "apply_harmony_effect"}
-    for block in graph_spec:
-        if block.get("kind") == "step" and block.get("operator") in pitch_ops:
-            return True
-        for step in block.get("steps", []):
-            if step.get("operator") in pitch_ops:
-                return True
-    return False
-
-
-def _build_runtime_context(
-    graph_spec: Sequence[Mapping[str, Any]],
-    audio_tensor: torch.Tensor,
-    sample_rate: int,
-) -> dict[str, Any]:
-    context: dict[str, Any] = {
-        "audio": audio_tensor,
-        "sr": sample_rate,
-        "device": device,
-    }
-    if _graph_uses_separation(graph_spec):
-        if not _separation_runtime_ready():
-            raise ValueError("Separation model not initialized.")
-        context["model"] = separation_model
-        context["processor"] = separation_processor
-    if _graph_uses_pitch(graph_spec):
-        if any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
-            raise ValueError("Pitch model not initialized.")
-        context["hcqt"] = pitch_hcqt
-        context["chromanet"] = pitch_chromanet
-        context["crop_fn"] = pitch_crop_fn
-    return context
-
-
-def _final_output_key(graph_spec: Sequence[Mapping[str, Any]]) -> str:
-    if not graph_spec:
-        raise ValueError("graph_spec is empty.")
-    block = graph_spec[-1]
-    outputs = block.get("output", block.get("outputs"))
-    if outputs is None:
-        return str(block["name"])
-    if isinstance(outputs, str):
-        return outputs
-    if isinstance(outputs, Sequence) and outputs:
-        return str(outputs[0])
-    raise ValueError("Could not determine final output key from graph_spec.")
-
-
-def _build_baseline_graph_spec(graph_spec: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    aliases: dict[str, str] = {}
-    baseline_spec: list[dict[str, Any]] = []
-
-    def resolve(name: Any) -> Any:
-        if not isinstance(name, str):
-            return name
-        while name in aliases:
-            name = aliases[name]
-        return name
-
-    for block in graph_spec:
-        kind = block.get("kind")
-        if kind == "separate":
-            baseline_spec.append(dict(block))
-            continue
-        if kind in {"chain", "send_return"}:
-            aliases[str(block.get("output"))] = str(resolve(block.get("source")))
-            continue
-        if kind == "step":
-            inputs = {key: resolve(value) for key, value in dict(block.get("inputs", {})).items()}
-            passthrough_source = next(iter(inputs.values()), None)
-            outputs = block.get("outputs")
-            if isinstance(outputs, str) and passthrough_source is not None:
-                aliases[outputs] = str(passthrough_source)
-                continue
-            if isinstance(outputs, Sequence) and not isinstance(outputs, str) and passthrough_source is not None:
-                for output_name in outputs:
-                    aliases[str(output_name)] = str(passthrough_source)
-                continue
-            raise ValueError(f"Cannot build no-op baseline for step block '{block.get('name')}'.")
-        if kind == "mix":
-            copied = dict(block)
-            copied["stem"] = resolve(block.get("stem"))
-            copied["residual"] = resolve(block.get("residual"))
-            baseline_spec.append(copied)
-            continue
-        raise ValueError(f"Unsupported graph block kind '{kind}' while building baseline.")
-    return baseline_spec
-
-
-def _render_graph_spec(
-    *,
-    compiler: RuntimePlanCompiler,
-    graph_spec: Sequence[Mapping[str, Any]],
-    audio_tensor: torch.Tensor,
-    sample_rate: int,
-    output_path: Path,
-) -> None:
-    started_at = time.perf_counter()
-    log_message(
-        "Render graph start | output=%s | blocks=%d | separation=%s | pitch=%s | samples=%d | sr=%d"
-        % (
-            output_path,
-            len(graph_spec),
-            _graph_uses_separation(graph_spec),
-            _graph_uses_pitch(graph_spec),
-            audio_tensor.shape[-1],
-            sample_rate,
-        )
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    log_message("Render graph compile | output=%s" % output_path)
-    graph = compiler.compile_graph_spec(graph_spec)
-    log_message("Render graph context | output=%s" % output_path)
-    context = _build_runtime_context(graph_spec, audio_tensor, sample_rate)
-    log_message("Render graph execute | output=%s" % output_path)
-    outputs = graph.run(**context)
-    final_key = _final_output_key(graph_spec)
-    if final_key not in outputs:
-        raise KeyError(f"Expected final output '{final_key}' was not produced.")
-    log_message("Render graph save | output=%s | final_key=%s" % (output_path, final_key))
-    save_audio(outputs[final_key], sample_rate, str(output_path))
-    log_message(
-        "Render graph done | output=%s | elapsed=%.1fs"
-        % (output_path, time.perf_counter() - started_at)
-    )
-
-
-def _render_ground_truth_plan_logic(
-    *,
-    audio_file: str,
-    graph_spec: Sequence[Mapping[str, Any]],
-    output_path: str,
-    config_dir: str | None = None,
-    separation_cache_dir: str | None = None,
-    max_audio_seconds: float | None = None,
-    overwrite: bool = False,
-    baseline_output_path: str | None = None,
-    source_copy_path: str | None = None,
-) -> dict[str, Any]:
-    plan_started_at = time.perf_counter()
-    source_path = Path(audio_file).expanduser().resolve()
-    if not source_path.exists():
-        raise FileNotFoundError(f"Input audio file does not exist: {source_path}")
-    normalized_max_audio_seconds = (
-        None
-        if max_audio_seconds is None or float(max_audio_seconds) <= 0.0
-        else float(max_audio_seconds)
-    )
-
-    output_path_obj = Path(output_path).expanduser().resolve()
-    baseline_path_obj = Path(baseline_output_path).expanduser().resolve() if baseline_output_path else None
-    source_copy_obj = Path(source_copy_path).expanduser().resolve() if source_copy_path else None
-
-    if source_copy_obj is not None:
-        source_copy_obj.parent.mkdir(parents=True, exist_ok=True)
-        if normalized_max_audio_seconds is None and (overwrite or not source_copy_obj.exists()):
-            shutil.copy2(source_path, source_copy_obj)
-
-    if (
-        output_path_obj.exists()
-        and not overwrite
-        and (baseline_path_obj is None or baseline_path_obj.exists())
-        and (source_copy_obj is None or source_copy_obj.exists())
-    ):
-        log_message("Render skipped existing | output=%s" % output_path_obj)
-        return {
-            "audio_path": str(source_path),
-            "output_path": str(output_path_obj),
-            "baseline_path": str(baseline_path_obj) if baseline_path_obj else None,
-            "source_copy_path": str(source_copy_obj) if source_copy_obj else None,
-            "status": "skipped_existing",
-        }
-
-    log_message(
-        "Render plan start | audio=%s | output=%s | baseline=%s | max_audio_seconds=%s | overwrite=%s"
-        % (
-            source_path,
-            output_path_obj,
-            baseline_path_obj,
-            normalized_max_audio_seconds,
-            overwrite,
-        )
-    )
-    compiler = _ground_truth_compiler_for(config_dir)
-    _set_ground_truth_separation_cache_dir(separation_cache_dir)
-    _patch_ground_truth_runtime()
-    log_message("Loading render audio | audio=%s" % source_path)
-    audio_tensor, sample_rate = _ensure_ground_truth_audio(
-        str(source_path),
-        max_audio_seconds=normalized_max_audio_seconds,
-    )
-    log_message(
-        "Loaded render audio | audio=%s | samples=%d | sr=%d"
-        % (source_path, audio_tensor.shape[-1], sample_rate)
-    )
-    graph_spec_list = [dict(block) for block in graph_spec]
-
-    if source_copy_obj is not None and (overwrite or not source_copy_obj.exists()):
-        log_message("Writing source copy | output=%s" % source_copy_obj)
-        save_audio(audio_tensor, sample_rate, str(source_copy_obj))
-
-    if baseline_path_obj is not None and (overwrite or not baseline_path_obj.exists()):
-        baseline_spec = _build_baseline_graph_spec(graph_spec_list)
-        if baseline_spec:
-            log_message("Rendering baseline | output=%s" % baseline_path_obj)
-            _render_graph_spec(
-                compiler=compiler,
-                graph_spec=baseline_spec,
-                audio_tensor=audio_tensor,
-                sample_rate=sample_rate,
-                output_path=baseline_path_obj,
-            )
-        else:
-            log_message("Writing baseline source passthrough | output=%s" % baseline_path_obj)
-            save_audio(audio_tensor, sample_rate, str(baseline_path_obj))
-
-    if overwrite or not output_path_obj.exists():
-        log_message("Rendering final plan | output=%s" % output_path_obj)
-        _render_graph_spec(
-            compiler=compiler,
-            graph_spec=graph_spec_list,
-            audio_tensor=audio_tensor,
-            sample_rate=sample_rate,
-            output_path=output_path_obj,
-        )
-
-    log_message(
-        "Render plan done | output=%s | elapsed=%.1fs"
-        % (output_path_obj, time.perf_counter() - plan_started_at)
-    )
-    return {
-        "audio_path": str(source_path),
-        "output_path": str(output_path_obj),
-        "baseline_path": str(baseline_path_obj) if baseline_path_obj else None,
-        "source_copy_path": str(source_copy_obj) if source_copy_obj else None,
-        "separation_cache_dir": str(ground_truth_separation_cache_dir) if ground_truth_separation_cache_dir else None,
-        "max_audio_seconds": normalized_max_audio_seconds,
-        "sample_rate": sample_rate,
-        "status": "rendered",
-    }
-
-
-@server.tool()
-async def render_ground_truth_plan(
-    audio_file: str,
-    graph_spec: list[dict],
-    output_path: str,
-    config_dir: str | None = None,
-    separation_cache_dir: str | None = None,
-    max_audio_seconds: float | None = None,
-    overwrite: bool = False,
-    baseline_output_path: str | None = None,
-    source_copy_path: str | None = None,
-) -> dict:
-    """Render a ground-truth graph_spec through the backend queue using long-lived server resources."""
-    if not processing_queue.is_running:
-        await processing_queue.start()
-
-    if _graph_uses_separation(graph_spec) and not _separation_runtime_ready():
-        log_message("Render request requires separation; initializing separation models.")
-        await initialize_separation_models()
-    if _graph_uses_pitch(graph_spec) and any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
-        log_message("Render request requires pitch; initializing pitch models.")
-        await initialize_pitch_models()
-
-    log_message("Queueing render request | audio=%s | output=%s" % (audio_file, output_path))
-    return await processing_queue.enqueue(
-        _render_ground_truth_plan_logic,
-        audio_file=audio_file,
-        graph_spec=graph_spec,
-        output_path=output_path,
-        config_dir=config_dir,
-        separation_cache_dir=separation_cache_dir,
-        max_audio_seconds=max_audio_seconds,
-        overwrite=overwrite,
-        baseline_output_path=baseline_output_path,
-        source_copy_path=source_copy_path,
     )
 
 

@@ -12,9 +12,9 @@ from ground_truth.io_utils import load_records, write_jsonl
 load_dotenv()
 
 MODEL_NAME = "gemini/gemini-3.1-flash-lite-preview" 
-DEFAULT_PLAN_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/subsampled_plans.jsonl")
-DEFAULT_OUTPUT_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/subsampled_plan_prompts.jsonl")
-MAX_ROUNDS = 4
+DEFAULT_PLAN_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/retagged_subsample.jsonl")
+DEFAULT_OUTPUT_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/retagged_subsample_prompts.jsonl")
+MAX_ROUNDS = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,7 +71,7 @@ def call_gemini(
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.7,
-        max_tokens=150,
+        max_tokens=256,
     )
     return response.choices[0].message.content
 
@@ -103,8 +103,8 @@ def build_prompt_chain(record: dict[str, object], max_rounds: int) -> dict[str, 
         "clip_id": str(record["clip_id"]),
         "plan_id":  str(record["plan_id"]),
         "source": str(record["target_stem"]),
-        "edit_graph": graph,
         "prompt_variants": descs,
+        "metadata": record
     }
 
 

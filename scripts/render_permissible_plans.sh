@@ -8,7 +8,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DEFAULT_OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged_audio}"
+DEFAULT_OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio-full}"
 
 usage() {
   cat <<USAGE
@@ -38,7 +38,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 exec "${PYTHON_BIN}" "${REPO_ROOT}/scripts/render_permissible_plans.py" \
-  --plans-path "$HOME/lab/postmaster/ground_truth/retagged_subsampled_plans_100.jsonl" \
+  --plans-path "$HOME/lab/postmaster/ground_truth/retagged_subsample.jsonl" \
   --output-root "${DEFAULT_OUTPUT_ROOT}" \
   --config-dir "${REPO_ROOT}/configs/ground_truth" \
   "$@"

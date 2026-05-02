@@ -40,7 +40,7 @@ def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path
         output["ground_truth_edit_audio"] = artifact_output_path
         output["input_audio"] = record["input_audio"]
         output["prompt_variants"] = record["prompt_variants"]
-        output["edit_graph"] = record["edit_graph"]
+        output["metadata"] = record
         outputs.append(output)
     write_jsonl(output_path, outputs)
 
