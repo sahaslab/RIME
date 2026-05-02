@@ -12,11 +12,14 @@ DEFAULT_OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audi
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--plans-path PATH] [--output-root PATH] [--manifest-path PATH] [--config-dir PATH] [--separation-cache-dir PATH] [--limit N] [--overwrite] [--fail-fast]
+Usage: $(basename "$0") [--plans-path PATH] [--output-root PATH] [--manifest-path PATH] [--config-dir PATH] [--separation-cache-dir PATH] [--limit N] [--workers N] [--overwrite] [--fail-fast]
 
 This is a thin wrapper around scripts/render_permissible_plans.py.
-It launches the backend MCP server once and sends queue-backed render jobs
-through the same long-lived worker architecture used by the agent pipeline.
+It launches one backend MCP server per active worker and sends queue-backed
+render jobs through the same long-lived worker architecture used by the agent
+pipeline.
+When --workers > 1, the Python script fans out clip batches across multiple
+backend server processes and merges results into one ordered manifest.
 
 Backend defaults:
   separation backend: demucs

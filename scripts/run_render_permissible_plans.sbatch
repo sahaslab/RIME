@@ -16,6 +16,7 @@ PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/retagged_subsample.j
 OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio-full}"
 CONFIG_DIR="${CONFIG_DIR:-$REPO_ROOT/configs/ground_truth}"
 RENDER_SEED="${RENDER_SEED:-0}"
+RENDER_WORKERS="${RENDER_WORKERS:-1}"
 LIMIT_ARG=()
 FAIL_FAST_ARG=()
 SHUFFLE_ARG=()
@@ -52,8 +53,9 @@ conda activate postmaster-clean
 
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-printf 'repo=%s\nplans=%s\noutput_root=%s\nmanifest=%s\nseed=%s\nbackend=%s\ndemucs_model=%s\n' \
+printf 'repo=%s\nplans=%s\noutput_root=%s\nmanifest=%s\nseed=%s\nworkers=%s\nbackend=%s\ndemucs_model=%s\n' \
   "$REPO_ROOT" "$PLANS_PATH" "$OUTPUT_ROOT" "$MANIFEST_PATH" "$RENDER_SEED" \
+  "$RENDER_WORKERS" \
   "${SEPARATION_BACKEND:-demucs}" "${DEMUCS_MODEL:-htdemucs_6s}"
 
 bash "$REPO_ROOT/scripts/render_permissible_plans.sh" \
@@ -62,6 +64,7 @@ bash "$REPO_ROOT/scripts/render_permissible_plans.sh" \
   --manifest-path "$MANIFEST_PATH" \
   --config-dir "$CONFIG_DIR" \
   --seed "$RENDER_SEED" \
+  --workers "$RENDER_WORKERS" \
   "${LIMIT_ARG[@]}" \
   "${FAIL_FAST_ARG[@]}" \
   "${SHUFFLE_ARG[@]}"
