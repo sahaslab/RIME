@@ -63,7 +63,7 @@ processing_queue = AudioProcessingQueue()
 log_file = "server_status.log"
 DEFAULT_SERVER_CONFIG_PATH = os.environ.get(
     "POST_MASTER_SERVER_CONFIG",
-    os.path.join(os.path.dirname(__file__), "..", "zero_shot_agent.toml"),
+    "/dartfs-hpc/rc/home/t/f00814t/lab/projects/RIME/configs/ground_truth/server/server.toml",
 )
 MIXTURE_HINTS = (
     "mixture",

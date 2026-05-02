@@ -44,4 +44,5 @@ exec "${PYTHON_BIN}" "${REPO_ROOT}/scripts/render_permissible_plans.py" \
   --plans-path "$HOME/lab/postmaster/ground_truth/retagged_subsample.jsonl" \
   --output-root "${DEFAULT_OUTPUT_ROOT}" \
   --config-dir "${REPO_ROOT}/configs/ground_truth" \
+  --workers 16
   "$@"

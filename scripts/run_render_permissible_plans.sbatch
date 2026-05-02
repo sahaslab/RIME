@@ -64,7 +64,7 @@ bash "$REPO_ROOT/scripts/render_permissible_plans.sh" \
   --manifest-path "$MANIFEST_PATH" \
   --config-dir "$CONFIG_DIR" \
   --seed "$RENDER_SEED" \
-  --workers "$RENDER_WORKERS" \
+  --workers 16 \
   "${LIMIT_ARG[@]}" \
   "${FAIL_FAST_ARG[@]}" \
   "${SHUFFLE_ARG[@]}"
