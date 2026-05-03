@@ -11,3 +11,4 @@ logs/*
 mtg-jamendo-dataset/
 eval/outputs/*
 derived/validation/
+failed_render.txt

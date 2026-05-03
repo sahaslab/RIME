@@ -2,7 +2,7 @@
 #SBATCH --job-name=pm-render
 #SBATCH --account=sahaslab-gpu
 #SBATCH --partition=standard
-#SBATCH -c 32
+#SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --time 5:00:00
 #SBATCH --output=logs/%x-%j.out
@@ -14,7 +14,7 @@ REPO_ROOT=/dartfs/rc/lab/S/SinghN/projects/RIME
 cd "${REPO_ROOT}"
 
 PLANS_PATH="${PLANS_PATH:-$HOME/lab/postmaster/ground_truth/retagged_subsample.jsonl}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio-1k}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/lab/postmaster/retagged-generated-audio-full}"
 CONFIG_DIR="${CONFIG_DIR:-$REPO_ROOT/configs/ground_truth}"
 RENDER_SEED="${RENDER_SEED:-0}"
 RENDER_WORKERS="${RENDER_WORKERS:-1}"
@@ -65,7 +65,7 @@ bash "$REPO_ROOT/scripts/render_permissible_plans.sh" \
   --manifest-path "$MANIFEST_PATH" \
   --config-dir "$CONFIG_DIR" \
   --seed "$RENDER_SEED" \
-  --workers 32 \
+  --workers 16 \
   "${LIMIT_ARG[@]}" \
   "${FAIL_FAST_ARG[@]}" \
   "${SHUFFLE_ARG[@]}"
