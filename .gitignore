@@ -1,0 +1,14 @@
+.ipynb_checkpoints/*
+*__pycache__
+*.checkpoints
+test_libraries.ipynb
+*.wav
+test_files/*
+*.log
+requests/
+logs/*
+*.jsonl
+mtg-jamendo-dataset/
+eval/outputs/*
+derived/validation/
+failed_render.txt

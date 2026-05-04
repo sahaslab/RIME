@@ -1,0 +1,269 @@
+operators:
+  # Symbolic operator registry for planning, validation, coverage, and runtime
+  # binding. Planning only uses names, tags, params, and signal_param. The
+  # optional `runtime` block is only used by the execution layer.
+  - name: separate_audio
+    aliases:
+      - separate
+    tags:
+      - separation
+    params:
+      - description
+    runtime:
+      module: libraries.separation
+      callable: separate
+
+  - name: apply_chorus_effect
+    aliases:
+      - apply_chorus
+      - chorus
+    tags:
+      - modulation
+      - chorus
+    params:
+      - rate_hz
+      - depth
+      - centre_delay_ms
+      - feedback
+      - mix
+    runtime:
+      module: libraries.effects
+      callable: apply_chorus
+
+  - name: apply_phaser_effect
+    aliases:
+      - apply_phaser
+      - phaser
+    tags:
+      - modulation
+      - phaser
+    params:
+      - rate_hz
+      - depth
+      - centre_frequency_hz
+      - feedback
+      - mix
+    runtime:
+      module: libraries.effects
+      callable: apply_phaser
+
+  - name: apply_distortion_effect
+    aliases:
+      - apply_distortion
+      - distortion
+    tags:
+      - distortion
+      - color
+    params:
+      - drive_db
+    runtime:
+      module: libraries.effects
+      callable: apply_distortion
+
+  - name: apply_reverb_effect
+    aliases:
+      - apply_reverb
+      - reverb
+    tags:
+      - time_based
+      - reverb
+    params:
+      - room_size
+      - damping
+      - wet_level
+      - dry_level
+      - width
+      - freeze_mode
+    runtime:
+      module: libraries.effects
+      callable: apply_reverb
+
+  - name: apply_delay_effect
+    aliases:
+      - apply_delay
+      - delay
+    tags:
+      - time_based
+      - delay
+    params:
+      - delay_seconds
+      - feedback
+      - mix
+    runtime:
+      module: libraries.effects
+      callable: apply_delay
+
+  - name: apply_compressor_effect
+    aliases:
+      - apply_compressor
+      - compressor
+    tags:
+      - dynamics
+      - compression
+    params:
+      - threshold_db
+      - ratio
+      - attack_ms
+      - release_ms
+    runtime:
+      module: libraries.effects
+      callable: apply_compressor
+
+  - name: apply_limiter_effect
+    aliases:
+      - apply_limiter
+      - limiter
+    tags:
+      - dynamics
+      - limiter
+    params:
+      - threshold_db
+      - release_ms
+    runtime:
+      module: libraries.effects
+      callable: apply_limiter
+
+  - name: apply_gain
+    aliases:
+      - apply_gain_tool
+      - gain
+    tags:
+      - level
+      - gain
+    params:
+      - gain_db
+    runtime:
+      module: libraries.mixing
+      callable: apply_gain
+
+  - name: apply_highpass_filter
+    aliases:
+      - apply_highpass
+      - apply_highpass_filter_tool
+      - highpass
+    tags:
+      - eq
+      - eq_pass
+    params:
+      - cutoff_frequency_hz
+    runtime:
+      module: libraries.mixing
+      callable: apply_highpass
+
+  - name: apply_lowpass_filter
+    aliases:
+      - apply_lowpass
+      - apply_lowpass_filter_tool
+      - lowpass
+    tags:
+      - eq
+      - eq_pass
+    params:
+      - cutoff_frequency_hz
+    runtime:
+      module: libraries.mixing
+      callable: apply_lowpass
+
+  - name: apply_highshelf_filter
+    aliases:
+      - apply_highshelf
+      - apply_highshelf_filter_tool
+      - highshelf
+    tags:
+      - eq
+      - eq_shelf
+    params:
+      - cutoff_frequency_hz
+      - gain_db
+      - q
+    runtime:
+      module: libraries.mixing
+      callable: apply_highshelf
+
+  - name: apply_lowshelf_filter
+    aliases:
+      - apply_lowshelf
+      - apply_lowshelf_filter_tool
+      - lowshelf
+    tags:
+      - eq
+      - eq_shelf
+    params:
+      - cutoff_frequency_hz
+      - gain_db
+      - q
+    runtime:
+      module: libraries.mixing
+      callable: apply_lowshelf
+
+  - name: apply_peak_filter
+    aliases:
+      - apply_peakfilter
+      - apply_peak_filter_tool
+      - peak_filter
+    tags:
+      - eq
+      - eq_peak
+    params:
+      - cutoff_frequency_hz
+      - gain_db
+      - q
+    runtime:
+      module: libraries.mixing
+      callable: apply_peakfilter
+
+  - name: apply_noisegate
+    aliases:
+      - apply_noisegate_tool
+      - noisegate
+    tags:
+      - dynamics
+      - gate
+    params:
+      - threshold_db
+      - ratio
+      - attack_ms
+      - release_ms
+    runtime:
+      module: libraries.mixing
+      callable: apply_noisegate
+
+  - name: mix_stems
+    aliases:
+      - mix_sources
+      - mix_stem_with_residual
+    tags:
+      - mix
+    params: []
+    signal_param: stem
+    runtime:
+      module: libraries.mixing
+      callable: mix_stem_with_residual
+
+  - name: apply_autotune
+    aliases:
+      - autotune
+    tags:
+      - pitch
+      - correction
+    params:
+      - key
+      - mode
+    runtime:
+      module: libraries.pitch
+      callable: autotune
+
+  - name: apply_harmony_effect
+    aliases:
+      - apply_harmony
+      - harmony
+    tags:
+      - pitch
+      - harmony
+    params:
+      - semitones
+      - key
+      - mode
+    runtime:
+      module: libraries.pitch
+      callable: generate_harmony

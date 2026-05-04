@@ -1,0 +1,289 @@
+# Leaf nodes under `distributions` are the only nodes that can be referenced by
+# `sample: ...`. Grouping nodes are just for organization.
+#
+# Editing guideline:
+# - keep related priors together by workflow or source family
+# - use choice distributions for explicit, human-auditable supports
+# - bias with weights instead of hiding values in code
+distributions:
+  # Time-based send/return defaults used for general ambience recipes.
+  space:
+    shared_send:
+      # Bus balance priors.
+      send_level:
+        type: uniform
+        low: 0.3
+        high: 0.8
+        samples: [0.3, 0.5, 0.8]
+      return_level:
+        type: uniform
+        low: 0.6
+        high: 1.15
+        samples: [0.6, 0.85, 1.15]
+      # Delay timing priors. We keep both synced and free-time options, with
+      # synced variants preferred by default.
+      delay:
+        synced:
+          # Beats are measured in quarter-note units:
+          # 0.5=eighth, 0.75=dotted eighth, 1.0=quarter.
+          beats:
+            type: choice
+            values:
+              - value: 0.5
+                weight: 2.0
+              - value: 0.75
+                weight: 3.0
+              - value: 1.0
+                weight: 1.0
+              - value: 1.5
+                weight: 0.8
+        free:
+          seconds:
+            type: uniform
+            low: 0.12
+            high: 0.75
+            samples: [0.12, 0.25, 0.45, 0.75]
+      feedback:
+        type: uniform
+        low: 0.0
+        high: 0.45
+        samples: [0.0, 0.18, 0.35, 0.45]
+      reverb:
+        room_size:
+          type: uniform
+          low: 0.25
+          high: 0.95
+          samples: [0.25, 0.5, 0.75, 0.95]
+        damping:
+          type: uniform
+          low: 0.25
+          high: 0.8
+          samples: [0.25, 0.55, 0.8]
+      post_eq:
+        # Standard “filter the wet path” cleanup.
+        highpass_hz:
+          type: choice
+          values:
+            - value: 700.0
+              weight: 1.0
+            - value: 1000.0
+              weight: 1.0
+        lowpass_hz:
+          type: choice
+          values:
+            - value: 2200.0
+              weight: 1.0
+            - value: 3000.0
+              weight: 1.0
+  # Stem rebalance priors.
+  balance:
+    target_gain:
+      up_db:
+        type: choice
+        values:
+          - value: 3.0
+            weight: 2.0
+          - value: 5.0
+            weight: 2.0
+          - value: 7.0
+            weight: 1.0
+      down_db:
+        type: choice
+        values:
+          - value: -3.0
+            weight: 2.0
+          - value: -5.0
+            weight: 2.0
+          - value: -7.0
+            weight: 1.0
+  # Problem-oriented cleanup priors.
+  cleanup:
+    vocal_sibilance:
+      cut_hz:
+        type: choice
+        values:
+          - value: 3800.0
+            weight: 1.0
+          - value: 4500.0
+            weight: 1.0
+      cut_db:
+        type: choice
+        values:
+          - value: -3.0
+            weight: 2.0
+          - value: -5.0
+            weight: 1.0
+      q:
+        type: choice
+        values:
+          - value: 2.5
+            weight: 1.0
+          - value: 4.0
+            weight: 1.0
+    hum:
+      # Placeholder until a dedicated hum-removal operator exists.
+      highpass_hz:
+        type: choice
+        values:
+          - value: 50.0
+            weight: 1.0
+          - value: 60.0
+            weight: 1.0
+  # Drum-specific dynamics priors favoring parallel treatment.
+  drums:
+    parallel_compression:
+      send_level:
+        type: choice
+        values:
+          - value: 0.6
+            weight: 1.0
+          - value: 0.85
+            weight: 2.0
+      return_level:
+        type: choice
+        values:
+          - value: 0.3
+            weight: 1.0
+          - value: 0.5
+            weight: 2.0
+      threshold_db:
+        type: choice
+        values:
+          - value: -28.0
+            weight: 1.0
+          - value: -36.0
+            weight: 1.0
+      ratio:
+        type: choice
+        values:
+          - value: 6.0
+            weight: 1.0
+          - value: 12.0
+            weight: 1.0
+    distortion:
+      drive_db:
+        type: choice
+        values:
+          - value: 6.0
+            weight: 2.0
+          - value: 10.0
+            weight: 2.0
+          - value: 14.0
+            weight: 1.0
+  # Vocal-specific priors.
+  vocals:
+    compression:
+      # Conservative control compression for pop-style leveling.
+      threshold_db:
+        type: choice
+        values:
+          - value: -24.0
+            weight: 1.0
+          - value: -30.0
+            weight: 1.0
+      ratio:
+        type: choice
+        values:
+          - value: 4.0
+            weight: 1.0
+          - value: 8.0
+            weight: 1.0
+      attack_ms:
+        type: choice
+        values:
+          - value: 5.0
+            weight: 1.0
+          - value: 10.0
+            weight: 1.0
+      release_ms:
+        type: choice
+        values:
+          - value: 40.0
+            weight: 1.0
+          - value: 80.0
+            weight: 1.0
+    harmony:
+      intervals:
+        type: choice
+        values:
+          - value: 3.0
+            weight: 4.0
+          - value: 5.0
+            weight: 1.5
+          - value: 7.0
+            weight: 1.0
+          - value: -3.0
+            weight: 2.0
+          - value: -5.0
+            weight: 1.2
+          - value: -7.0
+            weight: 0.8
+      backoff_db:
+        type: uniform
+        low: -6.0
+        high: -1.0
+        samples: [-6.0, -4.0, -2.5, -1.0]
+      post_eq:
+        highpass_hz:
+          type: choice
+          values:
+            - value: 300.0
+              weight: 1.0
+            - value: 500.0
+              weight: 1.0
+            - value: 700.0
+              weight: 0.8
+        lowpass_hz:
+          type: choice
+          values:
+            - value: 4500.0
+              weight: 1.0
+            - value: 6500.0
+              weight: 1.0
+            - value: 8500.0
+              weight: 0.8
+  # Tonal / color-shaping priors.
+  tone:
+    retro:
+      # Gentle “older playback chain” rolloff / dulling.
+      shelf_cut_hz:
+        type: choice
+        values:
+          - value: 5000.0
+            weight: 1.0
+          - value: 8000.0
+            weight: 1.0
+      shelf_gain_db:
+        type: choice
+        values:
+          - value: -5.0
+            weight: 1.0
+          - value: -8.0
+            weight: 1.0
+      lowpass_hz:
+        type: choice
+        values:
+          - value: 6500.0
+            weight: 1.0
+          - value: 8500.0
+            weight: 1.0
+    modulation:
+      chorus:
+        # Current operator support is chorus-only here; expand when more motifs land.
+        mix:
+          type: uniform
+          low: 0.25
+          high: 0.6
+          samples: [0.25, 0.4, 0.6]
+        depth:
+          type: uniform
+          low: 0.3
+          high: 0.65
+          samples: [0.3, 0.45, 0.65]
+        rate_hz:
+          type: choice
+          values:
+            - value: 0.35
+              weight: 1.0
+            - value: 0.9
+              weight: 1.0
