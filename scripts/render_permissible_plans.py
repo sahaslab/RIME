@@ -69,20 +69,43 @@ def baseline_description(row: Mapping[str, Any]) -> str | None:
     return None
 
 
+def has_poison_graph(row: Mapping[str, Any]) -> bool:
+    return bool(row.get("poison_graph_spec"))
+
+
 def slugify_filename(value: str) -> str:
     cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_")
     return cleaned or "full_mix"
 
 
 def baseline_output_path(row: Mapping[str, Any], clip_output_dir: Path) -> Path:
+    if has_poison_graph(row):
+        plan_id = str(row.get("plan_id", "poisoned_initial"))
+        return clip_output_dir / ("initial__%s.wav" % slugify_filename(plan_id))
     description = baseline_description(row)
     if description is None:
         return clip_output_dir / "original.wav"
-    return clip_output_dir / f"original__{slugify_filename(description)}.wav"
+    return clip_output_dir / ("original__%s.wav" % slugify_filename(description))
 
 
 def source_copy_path(audio_path: Path, clip_output_dir: Path) -> Path:
-    return clip_output_dir / f"source{audio_path.suffix}"
+    return clip_output_dir / ("source%s" % audio_path.suffix)
+
+
+def baseline_label(row: Mapping[str, Any]) -> str:
+    if has_poison_graph(row):
+        return "Poisoned Initial"
+    return "No-FX Remix Baseline"
+
+
+def baseline_detail(row: Mapping[str, Any]) -> str:
+    if has_poison_graph(row):
+        description = row.get("poison_description") or row.get("poison_graph_description")
+        if description:
+            return str(description)
+        return "Synthetic problem audio used as the corrective plan input."
+    description = baseline_description(row) or "target stem"
+    return "Separated %s remixed back with the residual, before planned FX." % description
 
 
 def render_manifest_metadata(
@@ -102,6 +125,12 @@ def render_manifest_metadata(
         "separation_target": row.get("separation_target"),
         "graph_description": row.get("graph_description"),
         "graph_spec": row.get("graph_spec", []),
+        "poison_id": row.get("poison_id"),
+        "poison_description": row.get("poison_description"),
+        "poison_graph_description": row.get("poison_graph_description"),
+        "poison_graph_spec": row.get("poison_graph_spec"),
+        "poison_tags": row.get("poison_tags", []),
+        "poison_issues": row.get("poison_issues", []),
         "bindings": row.get("bindings", {}),
         "applied_policies": row.get("applied_policies", []),
         "weight": row.get("weight"),
@@ -109,6 +138,9 @@ def render_manifest_metadata(
         "output_path": str(output_path),
         "baseline_path": str(baseline_path),
         "source_copy_path": str(source_path_copy),
+        "baseline_kind": "poisoned_initial" if has_poison_graph(row) else "no_fx_remix",
+        "baseline_label": baseline_label(row),
+        "baseline_detail": baseline_detail(row),
     }
 
 
@@ -221,6 +253,7 @@ async def render_plan_row(
         arguments={
             "audio_file": str(source_path),
             "graph_spec": list(row["graph_spec"]),
+            "poison_graph_spec": row.get("poison_graph_spec"),
             "output_path": str(output_path),
             "config_dir": str(config_dir),
             "separation_cache_dir": str(separation_cache_dir) if separation_cache_dir is not None else None,

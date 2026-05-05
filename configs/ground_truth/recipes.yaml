@@ -383,6 +383,265 @@ recipes:
         stem: processed_stem
         residual: residual
         output: final_audio
+  # Synthetic rebalance-up task with an exactly mirrored gain poison.
+  - id: restore_buried_target
+    description: Restore a buried stem by undoing an intentional level drop.
+    tags:
+      - cleanup
+      - level
+      - gain
+    weight: 0.85
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+      correction_gain_db:
+        sample: balance.target_gain.up_db
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: other
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: restore_target
+        source: target_stem
+        output: processed_stem
+        steps:
+          - name: gain_up
+            operator: apply_gain
+            params:
+              gain_db:
+                ref: bindings.correction_gain_db
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+    poisons:
+      - id: buried_target
+        description: Reduce the target stem so the corrective task is to bring it back up.
+        tags:
+          - poison
+          - level
+          - gain
+        issues:
+          - buried_target
+        graph:
+          - kind: separate
+            name: isolate_target
+            source: audio
+            description: ${bindings.target_description}
+            outputs:
+              - target_stem
+              - residual
+          - kind: chain
+            prefix: bury_target
+            source: target_stem
+            output: processed_stem
+            steps:
+              - name: gain_down
+                operator: apply_gain
+                params:
+                  gain_db:
+                    scale:
+                      value:
+                        ref: bindings.correction_gain_db
+                      factor: -1.0
+          - kind: mix
+            name: remix_target
+            stem: processed_stem
+            residual: residual
+            output: poisoned_audio
+  # Synthetic rebalance-down task with an exactly mirrored gain poison.
+  - id: tame_overpowering_target
+    description: Tame an overly loud stem by undoing an intentional level push.
+    tags:
+      - cleanup
+      - level
+      - gain
+    weight: 0.85
+    bindings:
+      target_candidate:
+        each_from: metadata.analysis.target_candidates
+      target_description:
+        ref: bindings.target_candidate.stem
+      target_family:
+        ref: bindings.target_candidate.family
+      correction_gain_db:
+        sample: balance.target_gain.down_db
+    when:
+      all:
+        - exists:
+            path: bindings.target_description
+        - neq:
+            path: bindings.target_family
+            value: other
+    graph:
+      - kind: separate
+        name: isolate_target
+        source: audio
+        description: ${bindings.target_description}
+        outputs:
+          - target_stem
+          - residual
+      - kind: chain
+        prefix: tame_target
+        source: target_stem
+        output: processed_stem
+        steps:
+          - name: gain_down
+            operator: apply_gain
+            params:
+              gain_db:
+                ref: bindings.correction_gain_db
+      - kind: mix
+        name: remix_target
+        stem: processed_stem
+        residual: residual
+        output: final_audio
+    poisons:
+      - id: overpowering_target
+        description: Push the target stem too high so the corrective task is to tuck it back.
+        tags:
+          - poison
+          - level
+          - gain
+        issues:
+          - overpowering_target
+        graph:
+          - kind: separate
+            name: isolate_target
+            source: audio
+            description: ${bindings.target_description}
+            outputs:
+              - target_stem
+              - residual
+          - kind: chain
+            prefix: overpower_target
+            source: target_stem
+            output: processed_stem
+            steps:
+              - name: gain_up
+                operator: apply_gain
+                params:
+                  gain_db:
+                    scale:
+                      value:
+                        ref: bindings.correction_gain_db
+                      factor: -1.0
+          - kind: mix
+            name: remix_target
+            stem: processed_stem
+            residual: residual
+            output: poisoned_audio
+  # Synthetic mains-hum cleanup for full mixes.
+  - id: synthetic_hum_cleanup
+    description: Remove synthetic mains hum from the full mix.
+    tags:
+      - cleanup
+      - eq
+      - eq_pass
+    weight: 0.8
+    bindings:
+      hum_frequency_hz:
+        values:
+          - 50.0
+          - 60.0
+    graph:
+      - kind: chain
+        prefix: hum_cleanup
+        order_profile: eq_cleanup
+        source: audio
+        output: final_audio
+        steps:
+          - name: highpass_hum
+            operator: apply_highpass_filter
+            params:
+              cutoff_frequency_hz:
+                ref: bindings.hum_frequency_hz
+    poisons:
+      - id: synthetic_mains_hum
+        description: Add 50 or 60 cycle hum so the corrective task is a simple low-end cleanup.
+        tags:
+          - poison
+          - noise
+          - hum
+        issues:
+          - hum
+        graph:
+          - kind: chain
+            prefix: add_hum
+            source: audio
+            output: poisoned_audio
+            steps:
+              - name: mains_hum
+                operator: introduce_mains_hum
+                params:
+                  fundamental_hz:
+                    ref: bindings.hum_frequency_hz
+                  level_db:
+                    sample: poison.noise.hum_level_db
+                  modulation_hz:
+                    sample: poison.noise.hum_modulation_hz
+  # Synthetic sub-rumble cleanup for full mixes.
+  - id: synthetic_rumble_cleanup
+    description: Remove synthetic low-frequency rumble from the full mix.
+    tags:
+      - cleanup
+      - eq
+      - eq_pass
+    weight: 0.8
+    graph:
+      - kind: chain
+        prefix: rumble_cleanup
+        order_profile: eq_cleanup
+        source: audio
+        output: final_audio
+        steps:
+          - name: highpass_rumble
+            operator: apply_highpass_filter
+            params:
+              cutoff_frequency_hz:
+                sample: cleanup.rumble.highpass_hz
+    poisons:
+      - id: synthetic_low_frequency_rumble
+        description: Add sub-bass rumble so the corrective task is a highpass cleanup.
+        tags:
+          - poison
+          - noise
+          - rumble
+        issues:
+          - rumble
+        graph:
+          - kind: chain
+            prefix: add_rumble
+            source: audio
+            output: poisoned_audio
+            steps:
+              - name: low_frequency_rumble
+                operator: introduce_low_frequency_rumble
+                params:
+                  level_db:
+                    sample: poison.noise.rumble_level_db
+                  highpass_hz:
+                    sample: poison.noise.rumble_highpass_hz
+                  lowpass_hz:
+                    sample: poison.noise.rumble_lowpass_hz
+                  modulation_hz:
+                    sample: poison.noise.rumble_modulation_hz
   # Direct vocal control compression.
   - id: vocal_control_compression
     description: Standard vocal control compression for clips with vocals.

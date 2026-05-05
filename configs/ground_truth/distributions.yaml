@@ -129,6 +129,16 @@ distributions:
             weight: 1.0
           - value: 60.0
             weight: 1.0
+    rumble:
+      highpass_hz:
+        type: choice
+        values:
+          - value: 30.0
+            weight: 1.0
+          - value: 40.0
+            weight: 1.0
+          - value: 50.0
+            weight: 0.8
   # Drum-specific dynamics priors favoring parallel treatment.
   drums:
     parallel_compression:
@@ -242,6 +252,51 @@ distributions:
               weight: 1.0
             - value: 8500.0
               weight: 0.8
+  # Synthetic poison priors paired with cleanup recipes.
+  poison:
+    noise:
+      hum_level_db:
+        type: choice
+        values:
+          - value: -30.0
+            weight: 1.0
+          - value: -24.0
+            weight: 1.0
+      hum_modulation_hz:
+        type: choice
+        values:
+          - value: 0.2
+            weight: 1.0
+          - value: 0.35
+            weight: 1.0
+      rumble_level_db:
+        type: choice
+        values:
+          - value: -24.0
+            weight: 1.0
+          - value: -18.0
+            weight: 1.0
+      rumble_highpass_hz:
+        type: choice
+        values:
+          - value: 18.0
+            weight: 1.0
+          - value: 24.0
+            weight: 1.0
+      rumble_lowpass_hz:
+        type: choice
+        values:
+          - value: 35.0
+            weight: 1.0
+          - value: 45.0
+            weight: 1.0
+      rumble_modulation_hz:
+        type: choice
+        values:
+          - value: 0.2
+            weight: 1.0
+          - value: 0.35
+            weight: 1.0
   # Tonal / color-shaping priors.
   tone:
     retro:
