@@ -16,12 +16,13 @@ WORKER_MAX_VARIANTS_PER_RECIPE: int | None = None
 WORKER_VARIANT_SELECTION: str = "diverse"
 WORKER_RANDOM_PLANS_PER_CLIP: int = 8
 WORKER_SEED: int = 0
+WORKER_POISON_ONLY: bool = False
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--analysis-path", type=Path, default=Path("~/lab/postmaster/ground_truth/mtg_jamendo_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
-    parser.add_argument("--output-path", type=Path, default=Path("~/lab/postmaster/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
+    parser.add_argument("--analysis-path", type=Path, default=Path("derived/ground_truth/mtg_jamendo_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
+    parser.add_argument("--output-path", type=Path, default=Path("derived/postmaster/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
     parser.add_argument("--config-dir", type=Path, default=Path("configs/ground_truth"), help="Ground-truth config directory. Default: %(default)s")
     parser.add_argument("--max-variants-per-recipe", type=int, default=None, help="Optional hard cap per recipe per clip. Default: no cap")
     parser.add_argument(
@@ -38,6 +39,7 @@ def main():
     )
     parser.add_argument("--random-plans-per-clip", type=int, default=8, help="Additional constrained random plans per clip. Default: %(default)s")
     parser.add_argument("--disable-random-plans", action="store_true", help="Disable constrained random plan generation")
+    parser.add_argument("--poison-only", action="store_true", help="Keep only plans that include a poison graph.")
     parser.add_argument("--limit", type=int, default=None, help="Optional clip limit for smoke tests or partial generation. Default: no limit")
     parser.add_argument("--num-workers", type=int, default=None, help="Optional number of worker processes for parallel processing. Default: no limit")
     args = parser.parse_args()
@@ -56,8 +58,9 @@ def main():
             config_dir=args.config_dir,
             max_variants_per_recipe=args.max_variants_per_recipe,
             variant_selection=args.variant_selection,
-            random_plans_per_clip=0 if args.disable_random_plans else args.random_plans_per_clip,
+            random_plans_per_clip=0 if (args.disable_random_plans or args.poison_only) else args.random_plans_per_clip,
             seed=args.seed,
+            poison_only=bool(args.poison_only),
             num_workers=num_workers,
             chunksize=chunksize
         )
@@ -71,13 +74,14 @@ def iter_rows(
     variant_selection: str,
     random_plans_per_clip: int,
     seed: int,
+    poison_only: bool,
     num_workers: int,
     chunksize: int
 ) -> Iterator[dict[str, Any]]:
     with multiprocessing.Pool(
         processes=num_workers,
         initializer=init_worker,
-        initargs=(config_dir, max_variants_per_recipe, variant_selection, random_plans_per_clip, seed),
+        initargs=(config_dir, max_variants_per_recipe, variant_selection, random_plans_per_clip, seed, poison_only),
     ) as pool:
         for rows_batch in tqdm(pool.imap(build_rows, records, chunksize=chunksize), total=len(records), desc="Building rows"):
             yield from rows_batch
@@ -89,13 +93,15 @@ def init_worker(
     variant_selection: str,
     random_plans_per_clip: int,
     seed: int,
+    poison_only: bool,
 ) -> None:
-    global WORKER_PLANNER, WORKER_MAX_VARIANTS_PER_RECIPE, WORKER_VARIANT_SELECTION, WORKER_RANDOM_PLANS_PER_CLIP, WORKER_SEED
+    global WORKER_PLANNER, WORKER_MAX_VARIANTS_PER_RECIPE, WORKER_VARIANT_SELECTION, WORKER_RANDOM_PLANS_PER_CLIP, WORKER_SEED, WORKER_POISON_ONLY
     WORKER_PLANNER = GroundTruthPlanner.from_directory(config_dir)
     WORKER_MAX_VARIANTS_PER_RECIPE = max_variants_per_recipe
     WORKER_VARIANT_SELECTION = variant_selection
     WORKER_RANDOM_PLANS_PER_CLIP = random_plans_per_clip
     WORKER_SEED = seed
+    WORKER_POISON_ONLY = poison_only
 
 
 def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -123,6 +129,8 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     issues = list(analysis.get("issues", []))
     rows: list[dict[str, Any]] = []
     for plan in plans:
+        if WORKER_POISON_ONLY and plan.poison_graph_spec is None:
+            continue
         row = plan.to_dict()
         row["clip_id"] = record.get("clip_id")
         row["audio_path"] = record.get("audio_path")
@@ -134,6 +142,11 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
         target_candidate = plan.bindings.get("target_candidate") or {}
         row["separation_target"] = target_candidate.get("separation_target")
         row["graph_description"] = WORKER_PLANNER.describe_plan(plan, validate=False)
+        row["poison_graph_description"] = (
+            None
+            if plan.poison_graph_spec is None
+            else WORKER_PLANNER.describe_graph_spec(plan.poison_graph_spec, validate=False)
+        )
         rows.append(row)
     return rows
 

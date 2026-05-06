@@ -39,6 +39,7 @@ SPECIAL_VALUE_HANDLER_NAMES = {
     "coalesce": "_expand_coalesce",
     "ref": "_expand_ref",
     "sample": "_expand_sample",
+    "scale": "_expand_scale",
     "tempo_sync": "_expand_tempo_sync"
 }
 
@@ -112,6 +113,11 @@ class ResolvedPlan:
     graph_spec: list[dict[str, Any]]
     recipe_tags: list[str]
     applied_policies: list[str] = field(default_factory=list)
+    poison_id: str | None = None
+    poison_description: str | None = None
+    poison_graph_spec: list[dict[str, Any]] | None = None
+    poison_tags: list[str] = field(default_factory=list)
+    poison_issues: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,7 +127,12 @@ class ResolvedPlan:
             "bindings": self.bindings,
             "graph_spec": self.graph_spec,
             "recipe_tags": self.recipe_tags,
-            "applied_policies": self.applied_policies
+            "applied_policies": self.applied_policies,
+            "poison_id": self.poison_id,
+            "poison_description": self.poison_description,
+            "poison_graph_spec": self.poison_graph_spec,
+            "poison_tags": self.poison_tags,
+            "poison_issues": self.poison_issues,
         }
 
 
@@ -304,6 +315,14 @@ class GroundTruthPlanner:
                 allowed, weight, applied_policies = self._resolve_weight(recipe, context)
                 if not allowed or weight <= 0.0:
                     continue
+                poison_variants = self._expand_recipe_poisons(
+                    recipe,
+                    context,
+                    mode,
+                    rng,
+                )
+                if recipe.get("poisons") and not poison_variants:
+                    continue
 
                 for graph_spec in self._expand_graph_blocks(
                     recipe.get("graph", []),
@@ -312,18 +331,42 @@ class GroundTruthPlanner:
                     rng
                 ):
                     self.validate_graph_spec(graph_spec)
-                    variants_for_recipe += 1
-                    recipe_plans.append(
-                        ResolvedPlan(
-                            plan_id="%s.%03d" % (recipe["id"], variants_for_recipe),
-                            recipe_id=recipe["id"],
-                            weight=weight,
-                            bindings=copy.deepcopy(bindings),
-                            graph_spec=graph_spec,
-                            recipe_tags=list(recipe.get("tags", [])),
-                            applied_policies=applied_policies
+                    for poison_variant in poison_variants:
+                        variants_for_recipe += 1
+                        recipe_plans.append(
+                            ResolvedPlan(
+                                plan_id="%s.%03d" % (recipe["id"], variants_for_recipe),
+                                recipe_id=recipe["id"],
+                                weight=weight,
+                                bindings=copy.deepcopy(bindings),
+                                graph_spec=graph_spec,
+                                recipe_tags=list(recipe.get("tags", [])),
+                                applied_policies=applied_policies,
+                                poison_id=(
+                                    None if poison_variant is None else poison_variant.get("id")
+                                ),
+                                poison_description=(
+                                    None
+                                    if poison_variant is None
+                                    else poison_variant.get("description")
+                                ),
+                                poison_graph_spec=(
+                                    None
+                                    if poison_variant is None
+                                    else copy.deepcopy(poison_variant["graph_spec"])
+                                ),
+                                poison_tags=(
+                                    []
+                                    if poison_variant is None
+                                    else list(poison_variant.get("tags", []))
+                                ),
+                                poison_issues=(
+                                    []
+                                    if poison_variant is None
+                                    else list(poison_variant.get("issues", []))
+                                ),
+                            )
                         )
-                    )
 
         return self._select_recipe_variants(
             recipe_plans,
@@ -331,6 +374,46 @@ class GroundTruthPlanner:
             variant_selection=variant_selection,
             rng=rng,
         )
+
+    def _expand_recipe_poisons(
+        self,
+        recipe: Mapping[str, Any],
+        context: Mapping[str, Any],
+        mode: str,
+        rng: random.Random,
+    ) -> list[dict[str, Any] | None]:
+        poison_specs = list(recipe.get("poisons", []))
+        if not poison_specs:
+            return [None]
+
+        expanded_poisons: list[dict[str, Any]] = []
+        for poison in poison_specs:
+            if not self._evaluate_condition(poison.get("when"), context):
+                continue
+
+            metadata_spec = {
+                key: value
+                for key, value in poison.items()
+                if key not in {"graph", "when"}
+            }
+            metadata_variants = (
+                self._expand_mapping(metadata_spec, context, mode, rng)
+                if metadata_spec
+                else [{}]
+            )
+            graph_variants = self._expand_graph_blocks(
+                poison.get("graph", []),
+                context,
+                mode,
+                rng,
+            )
+            for graph_spec in graph_variants:
+                self.validate_graph_spec(graph_spec)
+                for metadata_variant in metadata_variants:
+                    expanded = dict(metadata_variant)
+                    expanded["graph_spec"] = [copy.deepcopy(block) for block in graph_spec]
+                    expanded_poisons.append(expanded)
+        return expanded_poisons
 
     def _resolve_weight(
         self,
@@ -423,6 +506,13 @@ class GroundTruthPlanner:
                 graph_spec=copy.deepcopy(plan.graph_spec),
                 recipe_tags=list(plan.recipe_tags),
                 applied_policies=list(plan.applied_policies),
+                poison_id=plan.poison_id,
+                poison_description=plan.poison_description,
+                poison_graph_spec=(
+                    None if plan.poison_graph_spec is None else copy.deepcopy(plan.poison_graph_spec)
+                ),
+                poison_tags=list(plan.poison_tags),
+                poison_issues=list(plan.poison_issues),
             )
             for index, plan in enumerate(selected, start=1)
         ]
@@ -466,12 +556,12 @@ class GroundTruthPlanner:
         right: ResolvedPlan,
         family: Sequence[ResolvedPlan],
     ) -> float:
-        left_params = self._flatten_numeric_params(left.graph_spec)
-        right_params = self._flatten_numeric_params(right.graph_spec)
+        left_params = self._flatten_plan_numeric_params(left)
+        right_params = self._flatten_plan_numeric_params(right)
         keys = sorted(set(left_params) | set(right_params))
         if not keys:
             return 0.0
-        family_params = [self._flatten_numeric_params(plan.graph_spec) for plan in family]
+        family_params = [self._flatten_plan_numeric_params(plan) for plan in family]
         distances: list[float] = []
         for key in keys:
             values = [params[key] for params in family_params if key in params]
@@ -486,10 +576,10 @@ class GroundTruthPlanner:
         plan: ResolvedPlan,
         family: Sequence[ResolvedPlan],
     ) -> float:
-        params = self._flatten_numeric_params(plan.graph_spec)
+        params = self._flatten_plan_numeric_params(plan)
         if not params:
             return 0.0
-        family_params = [self._flatten_numeric_params(item.graph_spec) for item in family]
+        family_params = [self._flatten_plan_numeric_params(item) for item in family]
         scores: list[float] = []
         for key, value in params.items():
             values = [item[key] for item in family_params if key in item]
@@ -503,6 +593,20 @@ class GroundTruthPlanner:
             half_range = (high - low) / 2.0
             scores.append(min(abs(value - midpoint) / half_range, 1.0))
         return sum(scores) / len(scores) if scores else 0.0
+
+    def _flatten_plan_numeric_params(self, plan: ResolvedPlan) -> dict[str, float]:
+        flattened = {
+            "final:%s" % key: value
+            for key, value in self._flatten_numeric_params(plan.graph_spec).items()
+        }
+        if plan.poison_graph_spec:
+            flattened.update(
+                {
+                    "poison:%s" % key: value
+                    for key, value in self._flatten_numeric_params(plan.poison_graph_spec).items()
+                }
+            )
+        return flattened
 
     @staticmethod
     def _flatten_numeric_params(graph_spec: Sequence[Mapping[str, Any]]) -> dict[str, float]:
@@ -1396,6 +1500,18 @@ class GroundTruthPlanner:
         rng: random.Random
     ) -> list[Any]:
         return self._distribution_values(distribution_name, mode, rng)
+
+    def _expand_scale(
+        self,
+        spec: Mapping[str, Any],
+        context: Mapping[str, Any],
+        mode: str,
+        rng: random.Random,
+    ) -> list[float]:
+        factor = float(spec.get("factor", 1.0))
+        offset = float(spec.get("offset", 0.0))
+        values = self._expand_value(spec["value"], context, mode, rng)
+        return [(float(value) * factor) + offset for value in values]
 
     def _expand_tempo_sync(
         self,

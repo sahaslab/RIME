@@ -17,7 +17,7 @@ import soundfile as sf
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DARTFS_CACHE_ROOT = Path("/dartfs/rc/lab/S/SinghN/noah/.cache")
+DEFAULT_FILE_CACHE_ROOT = Path("~/.cache")
 
 sys.path.append(str(REPO_ROOT))
 
@@ -26,8 +26,8 @@ def _post_master_cache_root() -> Path:
     cache_root = os.environ.get("POST_MASTER_CACHE_DIR")
     if cache_root:
         return Path(cache_root).expanduser()
-    if DEFAULT_DARTFS_CACHE_ROOT.exists():
-        return DEFAULT_DARTFS_CACHE_ROOT
+    if DEFAULT_FILE_CACHE_ROOT.exists():
+        return DEFAULT_FILE_CACHE_ROOT
     xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
     if xdg_cache_home:
         return Path(xdg_cache_home).expanduser() / "post-master"
@@ -109,7 +109,7 @@ processing_queue = AudioProcessingQueue()
 log_file = "server_status.log"
 DEFAULT_SERVER_CONFIG_PATH = os.environ.get(
     "POST_MASTER_SERVER_CONFIG",
-    "/dartfs-hpc/rc/home/t/f00814t/lab/projects/RIME/configs/ground_truth/server/server.toml",
+    str((Path(__file__).resolve().parents[1] / "configs" / "ground_truth" / "server" / "server.toml").resolve()),
 )
 MIN_DEMUCS_STEM_RMS = 1e-4
 MIN_DEMUCS_STEM_RMS_RATIO = 0.02
@@ -1505,6 +1505,38 @@ def _build_baseline_graph_spec(graph_spec: Sequence[Mapping[str, Any]]) -> list[
     return baseline_spec
 
 
+def _execute_graph_spec(
+    *,
+    compiler: RuntimePlanCompiler,
+    graph_spec: Sequence[Mapping[str, Any]],
+    audio_tensor: torch.Tensor,
+    sample_rate: int,
+    output_path: Path | None = None,
+) -> Any:
+    output_label = "<memory>" if output_path is None else str(output_path)
+    log_message(
+        "Render graph start | output=%s | blocks=%d | separation=%s | pitch=%s | samples=%d | sr=%d"
+        % (
+            output_label,
+            len(graph_spec),
+            _graph_uses_separation(graph_spec),
+            _graph_uses_pitch(graph_spec),
+            audio_tensor.shape[-1],
+            sample_rate,
+        )
+    )
+    log_message("Render graph compile | output=%s" % output_label)
+    graph = compiler.compile_graph_spec(graph_spec)
+    log_message("Render graph context | output=%s" % output_label)
+    context = _build_runtime_context(graph_spec, audio_tensor, sample_rate)
+    log_message("Render graph execute | output=%s" % output_label)
+    outputs = graph.run(**context)
+    final_key = _final_output_key(graph_spec)
+    if final_key not in outputs:
+        raise KeyError(f"Expected final output '{final_key}' was not produced.")
+    return outputs[final_key]
+
+
 def _render_graph_spec(
     *,
     compiler: RuntimePlanCompiler,
@@ -1526,17 +1558,16 @@ def _render_graph_spec(
         )
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    log_message("Render graph compile | output=%s" % output_path)
-    graph = compiler.compile_graph_spec(graph_spec)
-    log_message("Render graph context | output=%s" % output_path)
-    context = _build_runtime_context(graph_spec, audio_tensor, sample_rate)
-    log_message("Render graph execute | output=%s" % output_path)
-    outputs = graph.run(**context)
+    rendered_audio = _execute_graph_spec(
+        compiler=compiler,
+        graph_spec=graph_spec,
+        audio_tensor=audio_tensor,
+        sample_rate=sample_rate,
+        output_path=output_path,
+    )
     final_key = _final_output_key(graph_spec)
-    if final_key not in outputs:
-        raise KeyError(f"Expected final output '{final_key}' was not produced.")
     log_message("Render graph save | output=%s | final_key=%s" % (output_path, final_key))
-    save_audio(outputs[final_key], sample_rate, str(output_path))
+    save_audio(rendered_audio, sample_rate, str(output_path))
     log_message(
         "Render graph done | output=%s | elapsed=%.1fs"
         % (output_path, time.perf_counter() - started_at)
@@ -1548,6 +1579,7 @@ def _render_ground_truth_plan_logic(
     audio_file: str,
     graph_spec: Sequence[Mapping[str, Any]],
     output_path: str,
+    poison_graph_spec: Sequence[Mapping[str, Any]] | None = None,
     config_dir: str | None = None,
     separation_cache_dir: str | None = None,
     max_audio_seconds: float | None = None,
@@ -1612,12 +1644,31 @@ def _render_ground_truth_plan_logic(
         % (source_path, audio_tensor.shape[-1], sample_rate)
     )
     graph_spec_list = [dict(block) for block in graph_spec]
+    poison_graph_spec_list = (
+        None if poison_graph_spec is None else [dict(block) for block in poison_graph_spec]
+    )
 
     if source_copy_obj is not None and (overwrite or not source_copy_obj.exists()):
         log_message("Writing source copy | output=%s" % source_copy_obj)
         save_audio(audio_tensor, sample_rate, str(source_copy_obj))
 
-    if baseline_path_obj is not None and (overwrite or not baseline_path_obj.exists()):
+    render_input_audio = audio_tensor
+    if poison_graph_spec_list:
+        log_message(
+            "Rendering poisoned initial | output=%s"
+            % (baseline_path_obj if baseline_path_obj is not None else "<memory>")
+        )
+        render_input_audio = _execute_graph_spec(
+            compiler=compiler,
+            graph_spec=poison_graph_spec_list,
+            audio_tensor=audio_tensor,
+            sample_rate=sample_rate,
+            output_path=baseline_path_obj,
+        )
+        if baseline_path_obj is not None and (overwrite or not baseline_path_obj.exists()):
+            baseline_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            save_audio(render_input_audio, sample_rate, str(baseline_path_obj))
+    elif baseline_path_obj is not None and (overwrite or not baseline_path_obj.exists()):
         baseline_spec = _build_baseline_graph_spec(graph_spec_list)
         if baseline_spec:
             log_message("Rendering baseline | output=%s" % baseline_path_obj)
@@ -1637,7 +1688,7 @@ def _render_ground_truth_plan_logic(
         _render_graph_spec(
             compiler=compiler,
             graph_spec=graph_spec_list,
-            audio_tensor=audio_tensor,
+            audio_tensor=render_input_audio,
             sample_rate=sample_rate,
             output_path=output_path_obj,
         )
@@ -1663,6 +1714,7 @@ async def render_ground_truth_plan(
     audio_file: str,
     graph_spec: list[dict],
     output_path: str,
+    poison_graph_spec: list[dict] | None = None,
     config_dir: str | None = None,
     separation_cache_dir: str | None = None,
     max_audio_seconds: float | None = None,
@@ -1674,10 +1726,14 @@ async def render_ground_truth_plan(
     if not processing_queue.is_running:
         await processing_queue.start()
 
-    if _graph_uses_separation(graph_spec) and not _separation_runtime_ready():
+    required_graph_specs = [graph_spec]
+    if poison_graph_spec:
+        required_graph_specs.append(poison_graph_spec)
+
+    if any(_graph_uses_separation(spec) for spec in required_graph_specs) and not _separation_runtime_ready():
         log_message("Render request requires separation; initializing separation models.")
         await initialize_separation_models()
-    if _graph_uses_pitch(graph_spec) and any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
+    if any(_graph_uses_pitch(spec) for spec in required_graph_specs) and any(m is None for m in [pitch_hcqt, pitch_chromanet, pitch_crop_fn]):
         log_message("Render request requires pitch; initializing pitch models.")
         await initialize_pitch_models()
 
@@ -1686,6 +1742,7 @@ async def render_ground_truth_plan(
         _render_ground_truth_plan_logic,
         audio_file=audio_file,
         graph_spec=graph_spec,
+        poison_graph_spec=poison_graph_spec,
         output_path=output_path,
         config_dir=config_dir,
         separation_cache_dir=separation_cache_dir,

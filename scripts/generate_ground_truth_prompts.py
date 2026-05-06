@@ -12,8 +12,8 @@ from ground_truth.io_utils import load_records, write_jsonl
 load_dotenv()
 
 MODEL_NAME = "gemini/gemini-3.1-flash-lite-preview" 
-DEFAULT_PLAN_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/retagged_subsample.jsonl")
-DEFAULT_OUTPUT_PATH = Path("/dartfs-hpc/rc/home/t/f00814t/lab/postmaster/ground_truth/retagged_subsample_prompts.jsonl")
+DEFAULT_PLAN_PATH = Path("derived/ground_truth/subsampled_plans.jsonl")
+DEFAULT_OUTPUT_PATH = Path("derived/ground_truth/subsampled_prompts.jsonl")
 MAX_ROUNDS = 3
 
 

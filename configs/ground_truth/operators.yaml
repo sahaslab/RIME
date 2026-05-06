@@ -228,6 +228,40 @@ operators:
       module: libraries.mixing
       callable: apply_noisegate
 
+  - name: introduce_mains_hum
+    aliases:
+      - add_mains_hum
+      - mains_hum
+    tags:
+      - poison
+      - noise
+      - hum
+    params:
+      - fundamental_hz
+      - level_db
+      - modulation_hz
+    runtime:
+      module: libraries.errors
+      callable: introduce_mains_hum
+
+  - name: introduce_low_frequency_rumble
+    aliases:
+      - add_low_frequency_rumble
+      - low_frequency_rumble
+      - rumble
+    tags:
+      - poison
+      - noise
+      - rumble
+    params:
+      - level_db
+      - highpass_hz
+      - lowpass_hz
+      - modulation_hz
+    runtime:
+      module: libraries.errors
+      callable: introduce_low_frequency_rumble
+
   - name: mix_stems
     aliases:
       - mix_sources

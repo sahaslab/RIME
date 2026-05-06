@@ -7,9 +7,10 @@ Usage: python check_missing_files.py <path_to_jsonl>
 import json
 import sys
 from pathlib import Path
+import argparse
 
 
-def check_missing_files(jsonl_path: str) -> None:
+def check_missing_files(jsonl_path: str, write_path: str) -> None:
     jsonl_file = Path(jsonl_path)
     if not jsonl_file.exists():
         print(f"Error: JSONL file not found: {jsonl_path}", file=sys.stderr)
@@ -39,9 +40,11 @@ def check_missing_files(jsonl_path: str) -> None:
 
     # Report
     if missing:
-        print(f"Missing files ({len(missing)}):")
-        for line_num, path in missing:
-            print(f"  Line {line_num}: {path}")
+        with open(write_path, "w", encoding="utf-8") as f:
+            for line_num, path in missing:
+                f.write(path + "\n")
+
+            
     else:
         print("All output_path files exist.")
 
@@ -52,8 +55,8 @@ def check_missing_files(jsonl_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <path_to_jsonl>", file=sys.stderr)
-        sys.exit(1)
-
-    check_missing_files(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Get failed outputs from a prompt_results JSONL.")
+    parser.add_argument("--in_path", help="Path to the input JSONL file")
+    parser.add_argument("--out_path", help="Path to the output txt file")
+    args = parser.parse_args()
+    check_missing_files(args.in_path, args.out_path)
