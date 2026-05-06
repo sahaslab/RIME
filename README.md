@@ -156,6 +156,25 @@ The coverage report includes:
 - dead operators
 - parameter-value histograms
 
+## 5. Render Plans
+
+TODO
+
+## 6. Generate Prompts
+
+```bash
+python scripts/generate_ground_truth_prompts.py
+```
+
+Important arguments:
+
+- `--plans-path`
+  Default: `derived/ground_truth/subsampled_plans.jsonl`
+- `--output-path`
+  Default: `derived/ground_truth/subsampled_plan_prompts.jsonl`
+- `--max-rounds`
+  Default: `3`
+
 ## Current Config Layout
 
 - [configs/ground_truth/datasets/mtg_jamendo.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/datasets/mtg_jamendo.yaml)
