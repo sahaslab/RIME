@@ -13,3 +13,5 @@ eval/outputs/*
 derived/validation/
 failed_render.txt
 *.txt
+scripts/*.sh
+scripts/*.sbatch
