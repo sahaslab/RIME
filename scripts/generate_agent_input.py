@@ -26,9 +26,18 @@ def load_render_index(manifest: list[dict]) -> dict:
         for record in manifest
     }
 
-def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path: str):
+def load_render_poison_index(manifest: list[dict]) -> dict:
+    return {
+        (record["clip_id"], record["plan_id"]): (record.get("output_path"), record.get("baseline_path"))
+        for record in manifest
+    }
+
+def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path: str, poisoning: bool=False):
     manifest = load_records(manifest_path)
-    index = load_render_index(manifest)
+    if poisoning:
+        index = load_render_poison_index(manifest)
+    else: 
+        index = load_render_index(manifest)
 
     plans = load_records(plan_prompts_path)
     outputs = []
@@ -36,9 +45,16 @@ def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path
     for record in plans:
         output = {}
         key = (record["clip_id"], record["plan_id"])
-        artifact_output_path = index.get(key) 
-        output["ground_truth_edit_audio"] = artifact_output_path
-        output["input_audio"] = record["input_audio"]
+        
+        if poisoning:
+            gt_path, baseline_path = index.get(key, (None, None))
+            output["ground_truth_edit_audio"] = gt_path
+            record["original_clean_audio"] = record["input_audio"]
+            output["input_audio"] = baseline_path
+        else:
+            artifact_output_path = index.get(key) 
+            output["ground_truth_edit_audio"] = artifact_output_path
+            output["input_audio"] = record["input_audio"]
         output["prompt_variants"] = record["prompt_variants"]
         output["metadata"] = record
         outputs.append(output)
@@ -52,6 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("--plan-prompts",  type=Path, required=True, help="Path to subsampled_plan_prompts.jsonl")
     parser.add_argument("--manifest", type=Path, required=True, help="Path to render_manifest_*.jsonl")
     parser.add_argument("--output",type=Path,default="matched_prompts.jsonl", help="Output JSONL path")
+    parser.add_argument("--poisoning", action="store_true", help="Use poisoning logic")
     args = parser.parse_args()
 
-    generate_agent_input(args.plan_prompts, args.manifest, args.output)
+    generate_agent_input(args.plan_prompts, args.manifest, args.output, args.poisoning)
