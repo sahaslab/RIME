@@ -186,26 +186,18 @@ Important arguments:
 
 ## Current Config Layout
 
-- [configs/ground_truth/datasets/mtg_jamendo.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/datasets/mtg_jamendo.yaml)
+- [configs/ground_truth/datasets/mtg_jamendo.yaml](configs/ground_truth/datasets/mtg_jamendo.yaml)
   Dataset ingestion and tag-to-target mapping
-- [configs/ground_truth/operators.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/operators.yaml)
+- [configs/ground_truth/operators.yaml](configs/ground_truth/operators.yaml)
   Symbolic operator registry and optional runtime binding metadata
-- [configs/ground_truth/distributions.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/distributions.yaml)
+- [configs/ground_truth/distributions.yaml](configs/ground_truth/distributions.yaml)
   Parameter priors
-- [configs/ground_truth/motifs.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/motifs.yaml)
+- [configs/ground_truth/motifs.yaml](configs/ground_truth/motifs.yaml)
   Reusable signal-chain motifs
-- [configs/ground_truth/recipes.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/recipes.yaml)
+- [configs/ground_truth/recipes.yaml](configs/ground_truth/recipes.yaml)
   Clip-level permissible task patterns
-- [configs/ground_truth/constraints.yaml](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/configs/ground_truth/constraints.yaml)
+- [configs/ground_truth/constraints.yaml](configs/ground_truth/constraints.yaml)
   Global chain-order and prior-shaping rules
-
-## Example Analysis Manifest
-
-There is a small example manifest at [examples/ground_truth_analysis.jsonl](/Users/nikhilsingh/Desktop/Git/Research/SAHAS/post-master/examples/ground_truth_analysis.jsonl).
-
-```bash
-python3 scripts/generate_ground_truth_plans.py --analysis-path examples/ground_truth_analysis.jsonl --output-path /tmp/ground_truth_plans.jsonl
-```
 
 ## Delay Handling
 
