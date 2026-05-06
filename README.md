@@ -158,7 +158,16 @@ The coverage report includes:
 
 ## 5. Render Plans
 
-TODO
+```bash
+python scripts/render_permissible_plans.py
+```
+
+Important arguments:
+
+- `--plans-path`
+  Default: `derived/ground_truth/subsampled_plans.json`
+- `--output-root`
+  Default: `derived/ground_truth/generated-audio`
 
 ## 6. Generate Prompts
 
