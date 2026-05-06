@@ -171,14 +171,6 @@ The coverage report includes:
 - [configs/ground_truth/constraints.yaml](configs/ground_truth/constraints.yaml)
   Global chain-order and prior-shaping rules
 
-## Example Analysis Manifest
-
-There is a small example manifest at [examples/ground_truth_analysis.jsonl](examples/ground_truth_analysis.jsonl).
-
-```bash
-python3 scripts/generate_ground_truth_plans.py --analysis-path examples/ground_truth_analysis.jsonl --output-path /tmp/ground_truth_plans.jsonl
-```
-
 ## Delay Handling
 
 Both delay modes are supported:
