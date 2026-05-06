@@ -21,8 +21,8 @@ WORKER_POISON_ONLY: bool = False
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--analysis-path", type=Path, default=Path("~/lab/postmaster/ground_truth/mtg_jamendo_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
-    parser.add_argument("--output-path", type=Path, default=Path("~/lab/postmaster/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
+    parser.add_argument("--analysis-path", type=Path, default=Path("derived/ground_truth/mtg_jamendo_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
+    parser.add_argument("--output-path", type=Path, default=Path("derived/postmaster/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
     parser.add_argument("--config-dir", type=Path, default=Path("configs/ground_truth"), help="Ground-truth config directory. Default: %(default)s")
     parser.add_argument("--max-variants-per-recipe", type=int, default=None, help="Optional hard cap per recipe per clip. Default: no cap")
     parser.add_argument(

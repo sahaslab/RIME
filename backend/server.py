@@ -17,7 +17,7 @@ import soundfile as sf
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DARTFS_CACHE_ROOT = Path("/dartfs/rc/lab/S/SinghN/noah/.cache")
+DEFAULT_FILE_CACHE_ROOT = Path("~/.cache")
 
 sys.path.append(str(REPO_ROOT))
 
@@ -26,8 +26,8 @@ def _post_master_cache_root() -> Path:
     cache_root = os.environ.get("POST_MASTER_CACHE_DIR")
     if cache_root:
         return Path(cache_root).expanduser()
-    if DEFAULT_DARTFS_CACHE_ROOT.exists():
-        return DEFAULT_DARTFS_CACHE_ROOT
+    if DEFAULT_FILE_CACHE_ROOT.exists():
+        return DEFAULT_FILE_CACHE_ROOT
     xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
     if xdg_cache_home:
         return Path(xdg_cache_home).expanduser() / "post-master"

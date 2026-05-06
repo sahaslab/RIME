@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--selected-tracks-path", type=Path, default=Path("derived/validation/mtg_jamendo_10/selected_tracks.jsonl"), help="Selected tracks JSONL from validation subset prep. Default: %(default)s")
     parser.add_argument("--metadata-path", type=Path, default=Path("mtg-jamendo-dataset/data/raw_30s_cleantags.tsv"), help="Local MTG-Jamendo metadata TSV. Default: %(default)s")
     parser.add_argument("--sha256-path", type=Path, default=Path("mtg-jamendo-dataset/data/download/raw_30s_audio_sha256_tracks.txt"), help="Full-quality MP3 checksum manifest. Default: %(default)s")
-    parser.add_argument("--cluster-root", type=str, default="discovery8:/dartfs-hpc/rc/home/f/f007krf/lab/shared/MTG-Jamendo", help="Remote cluster root containing <prefix>/<id>.mp3. Default: %(default)s")
+    parser.add_argument("--cluster-root", type=str, default="derived/MTG-Jamendo", help="Remote cluster root containing <prefix>/<id>.mp3. Default: %(default)s")
     parser.add_argument("--mp3-cache-dir", type=Path, default=Path("derived/validation/mtg_jamendo_10/mp3_cache"), help="Local cache for rsynced MP3s. Default: %(default)s")
     parser.add_argument("--audio-root", type=Path, default=Path("derived/validation/mtg_jamendo_10/audio"), help="Output decoded WAV root. Default: %(default)s")
     parser.add_argument("--max-audio-seconds", type=float, default=0.0, help="Decoded WAV duration cap. Use 0 for full track. Default: %(default)s")
