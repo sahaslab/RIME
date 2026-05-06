@@ -659,7 +659,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("~/lab/postmaster/generated-audio").expanduser(),
+        default=Path("derived/ground_truth/generated_audio").expanduser(),
         help="Root directory for rendered audio. Default: %(default)s",
     )
     parser.add_argument(
