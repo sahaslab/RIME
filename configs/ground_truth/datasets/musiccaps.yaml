@@ -1,0 +1,117 @@
+dataset:
+  name: musiccaps
+
+  # MusicCaps carries no instrument/genre columns, only free-text caption
+  # aspects, so the vocabulary and stem maps are inherited from mtg_jamendo and
+  # only extended below. Keys defined here win over the inherited ones.
+  extends: mtg_jamendo.yaml
+
+  files:
+    metadata: musiccaps_captions.csv
+
+  # One 10s clip per YouTube id, named <ytid>.wav under the audio root.
+  audio_extension: .wav
+
+  # Aspect phrases are prose, not tags: "punchy kick", "shimmering hi hats".
+  # These entries cover drum cues that MusicCaps names by drum-kit piece rather
+  # than by the kit, which the MTG tag vocabulary never needed. Counts are
+  # occurrences in musiccaps_captions.csv. Singular/plural is handled by the
+  # resolver, so only one form of each is listed.
+  demucs_target_map:
+    kick: drums        # 482
+    snare: drums       # 421
+    hat: drums         # 282, from "hi hats"
+    hihat: drums       # 22, from "hi-hat"
+    clap: drums        # 271
+    shaker: drums      # 165
+    tom: drums         # 72
+
+  # Aspects describing the recording rather than the music are never mined for
+  # genre: "ambient noises" and "ambient room noise" mean room tone, not the
+  # ambient genre, and they would otherwise mislabel 100 clips and skew the
+  # delay weight rule that keys off ambient/electronic/lounge.
+  aspect_stopwords:
+    - noise
+    - noisy
+    - sound
+    - quality
+    - recording
+    - hiss
+    - hissing
+    - hum
+    - humming
+    - distortion
+    - distorted
+    - mono
+    - stereo
+    - crowd
+    - static
+
+  # Genres and moods are mined from `aspect_list` by whole-word match. For genre,
+  # an aspect that resolves to an instrument is skipped, so "classical guitar"
+  # and "electronic drums" stay instruments instead of becoming genres. Moods are
+  # mined from every aspect, since a mood word legitimately rides along with an
+  # instrument ("groovy bass line").
+  aspect_domains:
+    # Only these genres do any work: the recipe constraints in recipes.yaml key
+    # off exactly this set, as exclusions and as weight multipliers.
+    genres:
+      - classical
+      - folk
+      - pop
+      - rock
+      - electronic
+      - ambient
+      - lounge
+
+    # Nothing in configs/ground_truth reads mood_themes; it is carried into plan
+    # rows for auditing, so this list is descriptive rather than load-bearing.
+    mood_themes:
+      - emotional
+      - passionate
+      - energetic
+      - groovy
+      - happy
+      - sad
+      - soulful
+      - youthful
+      - romantic
+      - spirited
+      - exciting
+      - upbeat
+      - mellow
+      - fun
+      - cheerful
+      - easygoing
+      - relaxing
+      - intense
+      - calming
+      - enthusiastic
+      - vibrant
+      - dreamy
+      - dark
+      - aggressive
+      - melancholic
+      - uplifting
+      - nostalgic
+
+  # `issues` gates corrective recipes (hum_cleanup, and a vocals cleanup keyed on
+  # sibilance/hiss), so only explicit defect words map here. Deliberately absent:
+  # "noisy" (x628), "low quality" (x1220) and "amateur recording" (x518) are
+  # general fidelity complaints in MusicCaps, and treating them as hiss would
+  # silently arm de-essing on roughly a fifth of the corpus. Uncomment to opt in.
+  issue_aspects:
+    hiss:
+      - hiss
+      - hissing
+      - white noise
+      - tape hiss
+      # - noisy
+    hum:
+      - hum
+      - humming
+      - mains hum
+      - electrical hum
+    sibilance:
+      - sibilance
+      - sibilant

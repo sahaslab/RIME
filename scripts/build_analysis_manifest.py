@@ -6,6 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ground_truth.datasets import available_dataset_names, build_analysis_manifest
 from ground_truth.io_utils import write_jsonl
 
+# MusicCaps lives outside the repo, in the shared lab corpus.
+MUSICCAPS_ROOT = Path("/dartfs/rc/lab/S/SinghN/shared/musiccaps")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -31,9 +34,13 @@ def main():
             args.metadata_dir = Path("derived/mtg-jamendo-dataset/data").expanduser()
         elif args.dataset_name == "medleydb":
             args.metadata_dir = Path("derived/medleydb").expanduser()
+        elif args.dataset_name == "musiccaps":
+            args.metadata_dir = MUSICCAPS_ROOT
     if args.audio_root is None:
         if args.dataset_name == "mtg_jamendo":
             args.audio_root = Path("derived/MTG-Jamendo").expanduser()
+        elif args.dataset_name == "musiccaps":
+            args.audio_root = MUSICCAPS_ROOT / "music_data"
     if args.output_path is None:
         args.output_path = Path(f"derived/ground_truth/{args.dataset_name}_analysis_manifest.jsonl").expanduser()
 
