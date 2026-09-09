@@ -181,8 +181,21 @@ Important arguments:
   Default: `derived/ground_truth/subsampled_plans.jsonl`
 - `--output-path`
   Default: `derived/ground_truth/subsampled_plan_prompts.jsonl`
-- `--max-rounds`
-  Default: `3`
+- `--config-dir`
+  Default: `configs/ground_truth`
+- `--levels`
+  Abstraction levels to emit, e.g. `0,1`. Levels they derive from are generated
+  regardless. Default: every level in the ladder.
+- `--max-attempts`
+  Generation attempts per level before keeping a text that still fails its hard
+  checks. Default: `3`
+
+The number of rewrites per graph is set by the ladder in
+[configs/ground_truth/abstraction_levels.yaml](configs/ground_truth/abstraction_levels.yaml),
+which declares each abstraction level's rules, exemplars, and checks. The
+descriptor vocabulary level 1 speaks in lives in
+[configs/ground_truth/param_bands.yaml](configs/ground_truth/param_bands.yaml)
+and is validated at load time against the supports in `distributions.yaml`.
 
 ## Current Config Layout
 

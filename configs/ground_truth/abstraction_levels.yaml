@@ -1,0 +1,166 @@
+# Abstraction ladder for ground-truth prompt generation.
+#
+# Each level is one rewrite of the same edit graph at a declared level of
+# precision. `derives_from` wires the iterative chain: `graph` means the level is
+# written from the symbolic graph itself, an integer means it is a rewrite of
+# that level's output.
+#
+# `rules` are injected verbatim into the generation prompt. `checks.hard` are
+# mechanical checks run on the generated text and used to drive a bounded retry;
+# `checks.rubric` are the criteria a judge or a human auditor grades, for the
+# properties no regex can settle.
+#
+# Supported `checks.hard` keys: `forbid_patterns` (regexes the text must not
+# match), `max_words`, `must_mention_operators` (with optional
+# `mention_exempt_tags`), and `must_contain_all_param_values`.
+#
+# Each level declares the voice it is written in via `system_prompt`, appended
+# with the shared `output_contract` below. The register is part of the
+# abstraction: level 0 is an engineer, level 1 a musician who mixes their own
+# material, level 2 a musician describing a sound.
+#
+# Editing guideline:
+# - keep a level's `system_prompt` to who is speaking and how long they speak;
+#   put anything checkable in `rules` instead, where the retry can quote it
+# - keep `constraints` machine-readable; it is the queryable summary of a level,
+#   and it also selects which context blocks the generator injects:
+#   `parameter_values: banded` adds the descriptor table, `focus:
+#   chain_character` adds the computed chain intensity and character tags
+# - keep `rules` short and imperative, one obligation per line
+# - span the magnitude range in `exemplars`; a set of uniformly subtle examples
+#   pulls generation toward subtle regardless of the actual chain
+# - keep exemplar values inside the supports in distributions.yaml
+version: 1
+
+# Fallback voice for a level that declares no `system_prompt` of its own. Every
+# level below sets one, so this is only a safety net for a newly added level.
+system_prompt: >-
+  You write the kind of instruction a working music producer would give to an
+  assistant engineer. Write it as one or two spoken sentences.
+
+# Appended to every level's system prompt so the output contract is stated once
+# and cannot drift between levels.
+output_contract: >-
+  Return only the instruction itself, with no preamble, quoting, or commentary.
+
+levels:
+  - id: 0
+    name: exact
+    derives_from: graph
+    # The speaker changes with the level: the register is itself part of the
+    # abstraction, not just the precision of what is said.
+    system_prompt: >-
+      You are a professional mixing engineer writing up a chain for an assistant
+      to patch. You know the signal path and you specify it exactly: every
+      processor named, every setting given with its units, in the order it is
+      patched. You speak economically, the way one engineer talks to another.
+      Write one to three spoken sentences.
+    constraints:
+      effect_name: preserve
+      parameter_values: exact
+      operator_order: preserve
+    rules:
+      - Name every effect explicitly.
+      - State every parameter value exactly as given, with its units.
+      - Describe the operators in the same order as the graph.
+      - Do not add processing that is not in the graph, and do not leave any out.
+    exemplars:
+      - Add a 7ms chorus with a depth of 0.65 and reverb with a 0.25 room size.
+      - >-
+        Send the lead vocal to an aux with a quarter-note delay at 0.35 feedback
+        into a 0.95 room-size reverb, high-pass the return at 1000Hz and
+        low-pass it at 3000Hz, then bring the return back up at 1.15.
+    checks:
+      hard:
+        must_contain_all_param_values: true
+      rubric:
+        - Every operator in the graph is named.
+        - Operator order matches the graph.
+    max_tokens: 320
+
+  - id: 1
+    name: banded
+    derives_from: 0
+    system_prompt: >-
+      You are a musician who records and mixes your own material. You know what
+      the common effects are called and you use their names, but you do not work
+      in numbers: you say how something should sound and how much of it there
+      should be. Your vocabulary is a player's, not a spec sheet's.
+      Write one or two spoken sentences.
+    constraints:
+      effect_name: preserve
+      parameter_values: banded
+      operator_order: free
+    rules:
+      - Name every effect explicitly.
+      - Do not state any numeric values or units.
+      - >-
+        Convey each parameter with the descriptor supplied for it. The suggested
+        wording is a suggestion, not a required vocabulary: prefer whichever
+        phrasing fits the character of the whole chain, as long as it keeps the
+        parameter at the magnitude shown.
+      - Operator order does not need to be preserved.
+    exemplars:
+      - Apply subtle reverb and a slow, deep chorus for a rich, shimmery effect.
+      - >-
+        Put the drums through a parallel bus with heavy, slammed compression and
+        obvious grit, and bring it back up level with the dry kit.
+    checks:
+      hard:
+        forbid_patterns:
+          - '\d'
+          - '(?i)\b(ms|hz|khz|db|bpm)\b'
+        must_mention_operators: true
+        # Naming every wet-path filter is faithful to the rule above but is the
+        # main source of retries on band-limited send chains. Add operator tags
+        # here to stop requiring them, e.g. `mention_exempt_tags: [eq_pass]`.
+      rubric:
+        - Every operator in the graph is named or unambiguously implied.
+        - >-
+          Each parameter's descriptor lands in the band the graph actually
+          specifies.
+        - The wording is consistent with the character of the chain as a whole.
+    max_tokens: 256
+
+  - id: 2
+    name: impressionistic
+    derives_from: 1
+    system_prompt: >-
+      You are a musician describing the sound you want rather than how to get it.
+      You talk about the overall character of the result and how far it is
+      pushed, in the words you would use about a record you like. Naming an
+      effect is fine where that is the natural way to say it, but you are asking
+      for an outcome, not dictating a recipe.
+      Write a single short sentence.
+    constraints:
+      focus: chain_character
+      effect_name: incidental
+      parameter_values: omit
+      operator_order: free
+    rules:
+      - >-
+        Summarize the chain as a whole: the overall sonic character it produces
+        and how strongly it is applied.
+      - >-
+        Describe the combined result rather than the individual processors.
+        Naming an effect is fine where that is the most natural way to convey
+        the character, but it is never required.
+      - Express magnitude in words, not numbers or units.
+      - Keep it to a single short instruction.
+    exemplars:
+      - Apply a delicate ethereal shimmer.
+      - Push it into a heavy, blown-out wash.
+      - Give it a dry, punchy, in-your-face weight.
+    checks:
+      hard:
+        forbid_patterns:
+          - '\d'
+          - '(?i)\b(ms|hz|khz|db|bpm)\b'
+        max_words: 24
+      rubric:
+        - Conveys the overall sonic character of the chain.
+        - >-
+          Conveys the overall magnitude of the chain, consistent with the
+          computed chain intensity.
+        - Reads as an intent rather than as a list of processors.
+    max_tokens: 128

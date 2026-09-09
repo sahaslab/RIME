@@ -1,0 +1,555 @@
+# Natural-language descriptor bands for operator parameters.
+#
+# These are the "predefined parameter ranges" that abstraction level 1 speaks in
+# instead of exact values. Every band set is grounded in the sampled support
+# declared in distributions.yaml: `sample_refs` names the distribution leaves a
+# parameter is drawn from (via motifs.yaml / recipes.yaml), and the loader
+# rejects a band set that leaves part of that support uncovered or that declares
+# a band no sampled value can reach.
+#
+# Editing guideline:
+# - put band edges on the midpoints between the `samples` landmarks of the
+#   referenced distribution, so each landmark lands in a distinct band
+# - `suggested_terms` are suggestions handed to the writer, never a required
+#   vocabulary; order them most literal first
+# - bands are half-open [previous upper, upper); the first band has no lower
+#   bound and the last `upper` is the top edge of the parameter
+# - `role` decides how a parameter is used downstream:
+#     magnitude  -> also feeds the chain intensity aggregate
+#     character  -> shapes wording but not intensity
+#     ignore     -> carries no perceptual information on its own
+# - `direction` controls binning and intensity: ascending (higher value = more
+#   intense), descending (lower value = more intense), absolute (bin on |value|)
+# - `sample_refs: []` marks a provisional band set for an operator no recipe
+#   samples yet; the loader skips grounding checks for it
+version: 1
+
+shared_bands:
+  # Spectral regions spanning every cutoff value reachable from
+  # distributions.yaml, from 18 Hz rumble poisons up to 8.5 kHz air shelves.
+  # Region edges sit in the empty gaps between the clusters of sampled cutoffs
+  # (18-60, 300-1000, 2200-3000, 3800-4500, 5000-8500) so no region is dead.
+  frequency_regions:
+    - upper: 100.0
+      suggested_terms: [subsonic, infrasonic, below the audible low end]
+    - upper: 600.0
+      suggested_terms: [low end, bass, body]
+    - upper: 1200.0
+      suggested_terms: [low mids, boxiness, lower midrange]
+    - upper: 3400.0
+      suggested_terms: [upper mids, presence, forward midrange]
+    - upper: 4800.0
+      suggested_terms: [sibilance, harshness, bite]
+    - upper: 22000.0
+      suggested_terms: [top end, air, brightness]
+
+param_bands:
+  separate_audio:
+    description:
+      role: ignore
+      note: Stem selector, not a perceptual parameter.
+
+  apply_reverb_effect:
+    room_size:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 1.0
+      sample_refs: [space.shared_send.reverb.room_size]
+      bands:
+        - upper: 0.375
+          suggested_terms: [tight, small, intimate]
+        - upper: 0.625
+          suggested_terms: [medium-sized, moderate, room-sized]
+        - upper: 0.85
+          suggested_terms: [large, spacious, hall-like]
+        - upper: 0.96
+          suggested_terms: [cavernous, vast, enormous]
+    damping:
+      role: character
+      direction: ascending
+      unit: normalized
+      sample_refs: [space.shared_send.reverb.damping]
+      hint: Low damping rings out bright; high damping soaks up the top end.
+      bands:
+        - upper: 0.4
+          suggested_terms: [bright, glassy, ringing]
+        - upper: 0.675
+          suggested_terms: [balanced, natural]
+        - upper: 0.81
+          suggested_terms: [dark, damped, muffled]
+    # Space motifs pin the reverb fully wet and let the enclosing send_return
+    # block set the audible amount, so these carry no magnitude of their own.
+    wet_level:
+      role: ignore
+      note: Always 1.0 on the wet path; audible amount lives on send_return.
+    dry_level:
+      role: ignore
+      note: Always 0.0 on the wet path.
+    width:
+      role: ignore
+      note: Pinned to 1.0 by every motif.
+    freeze_mode:
+      role: ignore
+      note: Pinned to 0.0 by every motif.
+
+  apply_delay_effect:
+    delay_seconds:
+      role: character
+      direction: ascending
+      unit: seconds
+      # The synced motif derives this from beats x tempo rather than sampling it
+      # directly, so the top band is deliberately wider than the free-time
+      # support: 1.5 beats at 60 BPM reaches 1.5 s.
+      sample_refs: [space.shared_send.delay.free.seconds]
+      bands:
+        - upper: 0.185
+          suggested_terms: [slapback, tight doubling, very short]
+        - upper: 0.35
+          suggested_terms: [short, quick echo]
+        - upper: 0.6
+          suggested_terms: [medium, mid-length echo]
+        - upper: 3.01
+          suggested_terms: [long, trailing, spacious echo]
+    feedback:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 0.75
+      sample_refs: [space.shared_send.feedback]
+      bands:
+        - upper: 0.09
+          suggested_terms: [a single repeat, no tail]
+        - upper: 0.265
+          suggested_terms: [a couple of repeats, short tail]
+        - upper: 0.4
+          suggested_terms: [several repeats, echoing]
+        - upper: 0.46
+          suggested_terms: [many repeats, regenerating, washed-out tail]
+    mix:
+      role: ignore
+      note: Always 1.0 on the wet path; audible amount lives on send_return.
+
+  apply_chorus_effect:
+    rate_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      sample_refs: [tone.modulation.chorus.rate_hz]
+      # The prior tops out at 0.9 Hz, so there is deliberately no "fast" band.
+      bands:
+        - upper: 0.625
+          suggested_terms: [very slow, drifting, barely moving]
+        - upper: 1.01
+          suggested_terms: [slow, gently swaying]
+    depth:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 1.0
+      sample_refs: [tone.modulation.chorus.depth]
+      bands:
+        - upper: 0.375
+          suggested_terms: [mild, gentle, shallow]
+        - upper: 0.55
+          suggested_terms: [moderate, medium]
+        - upper: 0.66
+          suggested_terms: [deep, lush, wide]
+    mix:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 1.5
+      sample_refs: [tone.modulation.chorus.mix]
+      bands:
+        - upper: 0.325
+          suggested_terms: [subtle, blended in behind the dry signal]
+        - upper: 0.5
+          suggested_terms: [clearly present, obvious]
+        - upper: 0.61
+          suggested_terms: [heavily blended, prominent, front-and-centre]
+    centre_delay_ms:
+      role: ignore
+      note: Pinned to 7.0 by the modulation motif.
+    feedback:
+      role: ignore
+      note: Pinned to 0.0 by the modulation motif.
+
+  apply_distortion_effect:
+    drive_db:
+      role: magnitude
+      direction: ascending
+      unit: db
+      weight: 2.0
+      sample_refs: [drums.distortion.drive_db]
+      bands:
+        - upper: 8.0
+          suggested_terms: [light saturation, warmth, a touch of colour]
+        - upper: 12.0
+          suggested_terms: [obvious grit, crunch, edge]
+        - upper: 15.01
+          suggested_terms: [heavy, aggressive, crushed]
+
+  apply_compressor_effect:
+    ratio:
+      role: magnitude
+      direction: ascending
+      unit: ratio
+      weight: 1.0
+      sample_refs:
+        - vocals.compression.ratio
+        - drums.parallel_compression.ratio
+      bands:
+        - upper: 5.0
+          suggested_terms: [gentle, light leveling]
+        - upper: 7.0
+          suggested_terms: [moderate control]
+        - upper: 10.0
+          suggested_terms: [firm, tight]
+        - upper: 20.01
+          suggested_terms: [heavy, squashed, slammed]
+    threshold_db:
+      role: magnitude
+      direction: descending
+      unit: db
+      weight: 0.5
+      sample_refs:
+        - vocals.compression.threshold_db
+        - drums.parallel_compression.threshold_db
+      hint: A lower threshold means more of the signal is being compressed.
+      bands:
+        - upper: -33.0
+          suggested_terms: [clamping down on nearly everything]
+        - upper: -29.0
+          suggested_terms: [working on most of the signal]
+        - upper: -26.0
+          suggested_terms: [working on the louder material]
+        - upper: 0.01
+          suggested_terms: [catching only the peaks]
+    attack_ms:
+      role: character
+      direction: ascending
+      unit: ms
+      sample_refs: [vocals.compression.attack_ms]
+      bands:
+        - upper: 7.5
+          suggested_terms: [fast attack, grabbing transients]
+        - upper: 20.01
+          suggested_terms: [moderate attack, letting transients through]
+    release_ms:
+      role: character
+      direction: ascending
+      unit: ms
+      sample_refs: [vocals.compression.release_ms]
+      bands:
+        - upper: 65.0
+          suggested_terms: [quick release, lively, pumping]
+        - upper: 200.01
+          suggested_terms: [slow release, smooth, unobtrusive]
+
+  apply_gain:
+    # Gain serves two unrelated jobs, and the same dB figure means different
+    # things in each: a stem rebalance is a mix decision, while the harmony
+    # tuck is a routine backoff. The default bands are calibrated on the
+    # rebalance recipes and `by_label` re-scopes the harmony motif's step.
+    gain_db:
+      role: magnitude
+      direction: absolute
+      unit: db
+      weight: 1.0
+      sample_refs:
+        - balance.target_gain.up_db
+        - balance.target_gain.down_db
+      hint: Sign says lift or trim; the band describes how far.
+      bands:
+        - upper: 4.0
+          suggested_terms: [a modest amount, noticeably]
+        - upper: 6.0
+          suggested_terms: [substantially, a good deal]
+        - upper: 8.01
+          suggested_terms: [drastically, way up or way down]
+      by_label:
+        tuck_harmony:
+          weight: 0.5
+          sample_refs: [vocals.harmony.backoff_db]
+          hint: How far the generated harmony sits under the lead.
+          bands:
+            - upper: 2.5
+              suggested_terms: [tucked just under the lead, close behind]
+            - upper: 4.5
+              suggested_terms: [tucked clearly under the lead]
+            - upper: 6.01
+              suggested_terms: [tucked well under the lead, kept in the background]
+
+  apply_highpass_filter:
+    cutoff_frequency_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      hint: Everything below this region is removed.
+      sample_refs:
+        - space.shared_send.post_eq.highpass_hz
+        - cleanup.hum.highpass_hz
+        - cleanup.rumble.highpass_hz
+        - vocals.harmony.post_eq.highpass_hz
+
+  apply_lowpass_filter:
+    cutoff_frequency_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      hint: Everything above this region is removed.
+      sample_refs:
+        - space.shared_send.post_eq.lowpass_hz
+        - tone.retro.lowpass_hz
+        - vocals.harmony.post_eq.lowpass_hz
+
+  apply_highshelf_filter:
+    cutoff_frequency_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      hint: The shelf tilts everything above this region.
+      sample_refs: [tone.retro.shelf_cut_hz]
+    gain_db:
+      role: magnitude
+      direction: absolute
+      unit: db
+      weight: 0.75
+      sample_refs: [tone.retro.shelf_gain_db]
+      bands:
+        - upper: 6.5
+          suggested_terms: [a gentle tilt, a slight rolloff]
+        - upper: 12.01
+          suggested_terms: [a strong tilt, a marked rolloff]
+    q:
+      role: ignore
+      note: Pinned to the default 0.707 by the retro motif.
+
+  apply_lowshelf_filter:
+    # No recipe samples the low shelf yet; bands mirror the high shelf so random
+    # plans still render, and are provisional until a motif grounds them.
+    cutoff_frequency_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      hint: The shelf tilts everything below this region.
+      sample_refs: []
+    gain_db:
+      role: magnitude
+      direction: absolute
+      unit: db
+      weight: 0.75
+      sample_refs: []
+      bands:
+        - upper: 6.5
+          suggested_terms: [a gentle tilt, a slight lift or trim]
+        - upper: 12.01
+          suggested_terms: [a strong tilt, a marked lift or trim]
+
+  apply_peak_filter:
+    cutoff_frequency_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      hint: The bell is centred on this region.
+      sample_refs: [cleanup.vocal_sibilance.cut_hz]
+    gain_db:
+      role: magnitude
+      direction: absolute
+      unit: db
+      weight: 0.75
+      sample_refs: [cleanup.vocal_sibilance.cut_db]
+      bands:
+        - upper: 4.0
+          suggested_terms: [a narrow trim, a light dip]
+        - upper: 12.01
+          suggested_terms: [a firm notch, a decisive cut]
+    q:
+      role: character
+      direction: ascending
+      unit: q
+      sample_refs: [cleanup.vocal_sibilance.q]
+      bands:
+        - upper: 3.25
+          suggested_terms: [moderately narrow, focused]
+        - upper: 12.01
+          suggested_terms: [narrow, surgical, pinpoint]
+
+  apply_harmony_effect:
+    semitones:
+      role: character
+      direction: absolute
+      unit: semitones
+      sample_refs: [vocals.harmony.intervals]
+      hint: Sign says above or below the lead.
+      bands:
+        - upper: 4.0
+          suggested_terms: [a close harmony, a third]
+        - upper: 6.0
+          suggested_terms: [a fourth or fifth apart]
+        - upper: 12.01
+          suggested_terms: [a wide harmony, a fifth or more]
+    key:
+      role: ignore
+      note: Musical key, inherited from clip analysis.
+    mode:
+      role: ignore
+      note: Musical mode, inherited from clip analysis.
+
+  introduce_mains_hum:
+    level_db:
+      role: magnitude
+      direction: ascending
+      unit: db
+      weight: 1.5
+      sample_refs: [poison.noise.hum_level_db]
+      bands:
+        - upper: -27.0
+          suggested_terms: [a faint hum, a low buzz]
+        - upper: 0.01
+          suggested_terms: [an audible hum, an intrusive buzz]
+    modulation_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      sample_refs: [poison.noise.hum_modulation_hz]
+      bands:
+        - upper: 0.275
+          suggested_terms: [steady, unwavering]
+        - upper: 1.01
+          suggested_terms: [slowly wavering, drifting in level]
+    fundamental_hz:
+      role: ignore
+      note: Regional mains frequency, not a perceptual choice.
+
+  introduce_low_frequency_rumble:
+    level_db:
+      role: magnitude
+      direction: ascending
+      unit: db
+      weight: 1.5
+      sample_refs: [poison.noise.rumble_level_db]
+      bands:
+        - upper: -21.0
+          suggested_terms: [a low-level rumble, a faint floor]
+        - upper: 0.01
+          suggested_terms: [a heavy rumble, an intrusive low roar]
+    highpass_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      sample_refs: [poison.noise.rumble_highpass_hz]
+    lowpass_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      bands_ref: shared.frequency_regions
+      sample_refs: [poison.noise.rumble_lowpass_hz]
+    modulation_hz:
+      role: character
+      direction: ascending
+      unit: hz
+      sample_refs: [poison.noise.rumble_modulation_hz]
+      bands:
+        - upper: 0.275
+          suggested_terms: [steady, unwavering]
+        - upper: 1.01
+          suggested_terms: [slowly wavering, breathing]
+
+# Levels declared on send_return blocks rather than on an operator. These carry
+# the audible amount for aux-space and parallel-compression chains, which is why
+# the wet-path operator levels above are marked `ignore`.
+block_bands:
+  send_return:
+    send_level:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 1.0
+      sample_refs:
+        - space.shared_send.send_level
+        - drums.parallel_compression.send_level
+      # The top band covers the literal `send_level: 1.0` on the harmony support
+      # recipe, which feeds the whole signal to the aux rather than sampling.
+      bands:
+        - upper: 0.4
+          suggested_terms: [a light feed into the effect]
+        - upper: 0.65
+          suggested_terms: [a moderate feed into the effect]
+        - upper: 0.9
+          suggested_terms: [a strong feed into the effect]
+        - upper: 1.01
+          suggested_terms: [the whole signal fed into the effect]
+    return_level:
+      role: magnitude
+      direction: ascending
+      unit: normalized
+      weight: 2.0
+      sample_refs:
+        - space.shared_send.return_level
+        - drums.parallel_compression.return_level
+      hint: This is the single strongest cue for how audible the effect is.
+      bands:
+        - upper: 0.55
+          suggested_terms: [tucked well under the dry signal, subtle]
+        - upper: 0.725
+          suggested_terms: [sitting under the dry signal, supportive]
+        # The edge sits just above unity so that a return_level of exactly 1.0,
+        # which several recipes pin, reads as level with the dry signal rather
+        # than as pushed above it.
+        - upper: 1.01
+          suggested_terms: [clearly audible, level with the dry signal]
+        - upper: 1.2
+          suggested_terms: [pushed above the dry signal, dominant]
+    dry_level:
+      role: ignore
+      note: Pinned to 1.0 by every send_return recipe.
+
+# Overlays widen the suggested vocabulary for a band when other operators are
+# present in the same chain, so descriptor wording can follow the character of
+# the chain as a whole. Tags are the operator tags from operators.yaml. Overlays
+# only ever append suggestions, so the magnitude axis stays intact.
+context_overlays:
+  - when_chain_has_tags: [distortion]
+    add_terms: [gritty, crushed, ragged, dirty]
+  - when_chain_has_tags: [modulation]
+    add_terms: [swirling, shimmery, watery, drifting]
+  - when_chain_has_tags: [reverb, delay]
+    add_terms: [washy, cavernous, distant, echoing]
+  - when_chain_has_tags: [compression, limiter]
+    add_terms: [punchy, dense, controlled, in-your-face]
+  - when_chain_has_tags: [eq_pass]
+    add_terms: [thin, filtered, telephone-like, band-limited]
+  - when_chain_has_tags: [harmony, pitch]
+    add_terms: [stacked, choral, layered]
+  - when_chain_has_tags: [poison, noise]
+    add_terms: [noisy, degraded, dirty-sounding]
+
+# Chain-level intensity: the weighted mean of the band positions of every
+# magnitude-role parameter in the chain, on 0..1. Abstraction level 2 is graded
+# on conveying this, so it is computed here rather than left to the writer.
+#
+# Edges sit on the quartiles so that a chain with a single four-band parameter
+# maps straight through: band k of that parameter lands in intensity band k.
+# Uneven edges skew the corpus, because a parameter is placed at the centre of
+# its band's slot and so clusters at 0.125 / 0.375 / 0.625 / 0.875.
+chain_magnitude:
+  bands:
+    - upper: 0.25
+      suggested_terms: [subtle, understated, barely there]
+    - upper: 0.5
+      suggested_terms: [noticeable, tasteful, present]
+    - upper: 0.75
+      suggested_terms: [strong, obvious, assertive]
+    # The scale is relative to what this corpus does, and the corpus is mostly
+    # ordinary mixing moves, so the top quartile is "pushed hard" rather than
+    # destroyed. Reserve outright wreckage for the poison recipes.
+    - upper: 1.01
+      suggested_terms: [pushed hard, aggressive, heavy-handed]
