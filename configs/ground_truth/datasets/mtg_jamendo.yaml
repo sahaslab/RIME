@@ -3,7 +3,7 @@ dataset:
 
   # Source file inside the filtered MTG-Jamendo metadata directory.
   files:
-    metadata: jamendo_subsample_retagged.tsv
+    metadata: postmaster-train.tsv
 
   # MTG uses `domain---tag` labels in a tab-separated tag tail.
   tags:
