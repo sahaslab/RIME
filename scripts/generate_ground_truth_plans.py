@@ -127,6 +127,7 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     genres = list(analysis.get("genres", []))
     mood_themes = list(analysis.get("mood_themes", []))
     issues = list(analysis.get("issues", []))
+    caption = analysis.get("caption")
     rows: list[dict[str, Any]] = []
     for plan in plans:
         if WORKER_POISON_ONLY and plan.poison_graph_spec is None:
@@ -137,6 +138,10 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
         row["genres"] = genres
         row["mood_themes"] = mood_themes
         row["issues"] = issues
+        # Carried per plan so plan and prompt artifacts stay self-contained
+        # after the analysis manifest is regenerated. None when the dataset
+        # ships no captions.
+        row["caption"] = caption
         row["target_stem"] = plan.bindings.get("target_description")
         row["target_family"] = plan.bindings.get("target_family")
         target_candidate = plan.bindings.get("target_candidate") or {}

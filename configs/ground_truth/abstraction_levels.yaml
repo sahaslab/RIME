@@ -12,7 +12,8 @@
 #
 # Supported `checks.hard` keys: `forbid_patterns` (regexes the text must not
 # match), `max_words`, `must_mention_operators` (with optional
-# `mention_exempt_tags`), and `must_contain_all_param_values`.
+# `mention_exempt_tags`), `must_mention_stems`, and
+# `must_contain_all_param_values`.
 #
 # Each level declares the voice it is written in via `system_prompt`, appended
 # with the shared `output_contract` below. The register is part of the
@@ -61,11 +62,14 @@ levels:
       operator_order: preserve
     rules:
       - Name every effect explicitly.
+      - Name the stem the chain is applied to.
       - State every parameter value exactly as given, with its units.
       - Describe the operators in the same order as the graph.
       - Do not add processing that is not in the graph, and do not leave any out.
     exemplars:
-      - Add a 7ms chorus with a depth of 0.65 and reverb with a 0.25 room size.
+      - >-
+        On the guitar, add a 7ms chorus with a depth of 0.65, then reverb with a
+        0.25 room size.
       - >-
         Send the lead vocal to an aux with a quarter-note delay at 0.35 feedback
         into a 0.95 room-size reverb, high-pass the return at 1000Hz and
@@ -73,6 +77,7 @@ levels:
     checks:
       hard:
         must_contain_all_param_values: true
+        must_mention_stems: true
       rubric:
         - Every operator in the graph is named.
         - Operator order matches the graph.
@@ -92,7 +97,10 @@ levels:
       parameter_values: banded
       operator_order: free
     rules:
-      - Name every effect explicitly.
+      - >-
+        Name every effect, either by its usual name or by a common word for the
+        thing it does: "grit" or "dirt" for distortion, "volume" for gain.
+      - Say which part of the mix you are treating.
       - Do not state any numeric values or units.
       - >-
         Convey each parameter with the descriptor supplied for it. The suggested
@@ -101,7 +109,9 @@ levels:
         parameter at the magnitude shown.
       - Operator order does not need to be preserved.
     exemplars:
-      - Apply subtle reverb and a slow, deep chorus for a rich, shimmery effect.
+      - >-
+        Give the guitar subtle reverb and a slow, deep chorus for a rich,
+        shimmery effect.
       - >-
         Put the drums through a parallel bus with heavy, slammed compression and
         obvious grit, and bring it back up level with the dry kit.
@@ -111,6 +121,7 @@ levels:
           - '\d'
           - '(?i)\b(ms|hz|khz|db|bpm)\b'
         must_mention_operators: true
+        must_mention_stems: true
         # Naming every wet-path filter is faithful to the rule above but is the
         # main source of retries on band-limited send chains. Add operator tags
         # here to stop requiring them, e.g. `mention_exempt_tags: [eq_pass]`.
@@ -146,17 +157,21 @@ levels:
         Naming an effect is fine where that is the most natural way to convey
         the character, but it is never required.
       - Express magnitude in words, not numbers or units.
+      - >-
+        Say which part of the mix it applies to. This is the one concrete detail
+        the instruction keeps.
       - Keep it to a single short instruction.
     exemplars:
-      - Apply a delicate ethereal shimmer.
-      - Push it into a heavy, blown-out wash.
-      - Give it a dry, punchy, in-your-face weight.
+      - Give the vocal a delicate ethereal shimmer.
+      - Push the guitar into a heavy, blown-out wash.
+      - Give the drums a dry, punchy, in-your-face weight.
     checks:
       hard:
         forbid_patterns:
           - '\d'
           - '(?i)\b(ms|hz|khz|db|bpm)\b'
         max_words: 24
+        must_mention_stems: true
       rubric:
         - Conveys the overall sonic character of the chain.
         - >-

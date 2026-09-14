@@ -532,6 +532,85 @@ context_overlays:
   - when_chain_has_tags: [poison, noise]
     add_terms: [noisy, degraded, dirty-sounding]
 
+# Colloquial names accepted in place of an operator's technical name where a
+# level requires effects to be named. Additive: the name derived from the
+# operator itself always stays acceptable. This exists because the prompt
+# already suggests colloquial wording — `gritty` and `dirty` are offered to any
+# chain carrying the distortion tag above — so a writer that takes the
+# suggestion should not then be failed for not saying "distortion".
+#
+# Matching is substring-based on a lowercase, alphanumeric-only rendering of the
+# text, which has two consequences:
+# - a stem covers its inflections: `grit` matches "gritty", `crunch` matches
+#   "crunchy", `saturate` matches "saturated"
+# - separators vanish but word order survives, so a phrase matches only that
+#   exact sequence of words: `turn up` catches "turn up the drums" but not
+#   "turn it up", which is why both are listed. A separated object still slips
+#   through — "turn the drums up" matches neither, and cannot be enumerated —
+#   so the single words below carry most of the load for gain.
+#
+# Editing guideline: include a word only if it identifies this processor on its
+# own. Deliberately excluded: `level` for gain, which would be satisfied by the
+# return_level band term "level with the dry signal"; `boost` and `trim`, which
+# the shelf and peak filters equally earn through their own gain_db; `warmth`
+# and `colour` for distortion, which read just as naturally as a low-shelf move.
+operator_names:
+  apply_gain:
+    - volume
+    - louder
+    - quieter
+    - turn up
+    - turn it up
+    - turn down
+    - turn it down
+  apply_distortion_effect:
+    - grit
+    - dirt
+    - crunch
+    - fuzz
+    - saturate
+    - saturation
+    - overdrive
+    - drive
+  # "hum" already matches from the operator's own name, so only the buzz
+  # synonym is additive here.
+  introduce_mains_hum:
+    - buzz
+  # "rumble" likewise already matches. `low-end noise` is the most generic
+  # entry in this section and the first to drop if it proves too loose.
+  introduce_low_frequency_rumble:
+    - roar
+    - thud
+    - low-end noise
+
+# Words accepted as naming the stem an edit is applied to. The separate block
+# always names its target with the bare Demucs stem, so these are keyed on that
+# stem, and the stem's own name is always accepted on top of the list.
+#
+# These are a deliberate subset of the `demucs_target_map` in the dataset
+# configs, which maps ~200 instrument words onto the same six stems. Only the
+# words a producer would actually reach for are listed; the map's long tail
+# ("guitareelectrique", "cvp509") would add no coverage here. Derive these from
+# that map at runtime instead if you want the full instrument vocabulary.
+#
+# Singular forms do the work of both numbers, since matching is substring-based:
+# `vocal` covers "vocals", `drum` covers "drums".
+#
+# `low end` is deliberately absent from bass: it is a spectral region term in
+# `shared_bands.frequency_regions`, so a high-pass on any stem would satisfy it.
+stem_names:
+  vocals: [vocal, voice, vox, singer, singing, choir]
+  drums: [drum, kit, percussion, beat]
+  bass: [bass]
+  guitar: [guitar, gtr]
+  piano: [piano, keys, keyboard, organ]
+  # The catch-all stem has no word a producer would use for it, so requiring one
+  # would fail every plan that targets it. An empty list exempts the stem.
+  # Currently unreachable — `_build_target_candidates` drops `other` candidates
+  # before a plan can target one — and kept only so that removing that skip does
+  # not start failing every plan.
+  other: []
+
 # Chain-level intensity: the weighted mean of the band positions of every
 # magnitude-role parameter in the chain, on 0..1. Abstraction level 2 is graded
 # on conveying this, so it is computed here rather than left to the writer.

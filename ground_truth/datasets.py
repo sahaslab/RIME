@@ -312,6 +312,7 @@ def build_manifest_row(
     key_name: str | None = None,
     mode_name: str | None = None,
     issues: Sequence[str] = (),
+    caption: str | None = None,
 ) -> dict[str, Any]:
     target_candidates = _build_target_candidates(
         instrument_tags=instrument_tags,
@@ -333,6 +334,11 @@ def build_manifest_row(
             "tempo_bpm": tempo_bpm,
             "key": key_name,
             "mode": mode_name,
+            # Free-text description of the clip, promoted out of the
+            # dataset-specific payload so downstream stages can read it without
+            # knowing which dataset a row came from. `None` for datasets that
+            # ship no captions, so consumers must treat it as optional.
+            "caption": caption if caption is not None else dataset_payload.get("caption"),
         },
     }
 

@@ -196,6 +196,12 @@ class ChainProfile:
     # for reverb damping.
     overlay_terms: tuple[str, ...] = field(default_factory=tuple)
     operator_tags: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Extra colloquial names accepted for each operator when checking that the
+    # prose names the effects it is describing.
+    operator_names: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Stems the chain separates out and edits, mapped to the words accepted as
+    # naming each. A stem mapped to an empty tuple is exempt from the check.
+    stem_names: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def param_values(self) -> tuple[tuple[str, Any], ...]:
         return tuple(
@@ -221,9 +227,13 @@ class BandLexicon:
         overlays: Sequence[Mapping[str, Any]],
         magnitude_bands: Sequence[Band],
         shared_bands: Mapping[str, tuple[Band, ...]],
-        version: int = 1
+        version: int = 1,
+        operator_names: Mapping[str, tuple[str, ...]] | None = None,
+        stem_names: Mapping[str, tuple[str, ...]] | None = None
     ):
         self.version = version
+        self._operator_names = dict(operator_names or {})
+        self._stem_names = dict(stem_names or {})
         self._param_bands = {
             operator: dict(params) for operator, params in param_bands.items()
         }
@@ -271,7 +281,23 @@ class BandLexicon:
             overlays=loaded.get("context_overlays") or [],
             magnitude_bands=magnitude_bands,
             shared_bands=shared_bands,
-            version=int(loaded.get("version", 1))
+            version=int(loaded.get("version", 1)),
+            operator_names={
+                operator: cls._normalize_names(names)
+                for operator, names in (loaded.get("operator_names") or {}).items()
+            },
+            stem_names={
+                stem: cls._normalize_names(names)
+                for stem, names in (loaded.get("stem_names") or {}).items()
+            }
+        )
+
+    @staticmethod
+    def _normalize_names(names: Any) -> tuple[str, ...]:
+        return tuple(
+            NON_ALNUM_RE.sub("", str(name).lower())
+            for name in names or []
+            if str(name).strip()
         )
 
     def validate_against_operators(self, registry: OperatorRegistry) -> None:
@@ -286,6 +312,34 @@ class BandLexicon:
                         operator
                     )
                 )
+        for operator in self._operator_names:
+            registry.resolve(operator)
+
+    def operator_name_tokens(self, operator: str) -> tuple[str, ...]:
+        """Normalized colloquial names accepted for an operator."""
+        return self._operator_names.get(operator, ())
+
+    def stem_name_tokens(self, stem: str) -> tuple[str, ...]:
+        """Normalized words accepted as naming a stem, the stem itself included.
+
+        An empty tuple means the stem is exempt: it was declared with no words,
+        because no natural phrase identifies it.
+
+        Every corpus in use names its separation target with a bare Demucs stem,
+        so the configured lists carry this. A dataset that instead supplies a
+        free-text target ("lead vocal") falls back to that description's own
+        longer words, which keeps the check lenient rather than demanding the
+        exact phrase and failing every plan.
+        """
+        if stem in self._stem_names:
+            if not self._stem_names[stem]:
+                return ()
+            canonical = NON_ALNUM_RE.sub("", stem.lower())
+            return tuple(dict.fromkeys((canonical, *self._stem_names[stem])))
+        words = [word for word in re.split(r"[^a-z0-9]+", stem.lower()) if word]
+        return tuple(
+            dict.fromkeys(("".join(words), *(word for word in words if len(word) >= 4)))
+        )
 
     def validate_against_distributions(
         self,
@@ -604,7 +658,31 @@ class ChainReader:
             tags=chain_tags,
             magnitude=self._magnitude(descriptors),
             overlay_terms=self.lexicon.overlay_terms(chain_tags),
-            operator_tags=operator_tags
+            operator_tags=operator_tags,
+            operator_names={
+                operator: self.lexicon.operator_name_tokens(operator)
+                for operator in operator_tags
+                if self.lexicon.operator_name_tokens(operator)
+            },
+            stem_names={
+                stem: self.lexicon.stem_name_tokens(stem)
+                for stem in self._read_stems(graph_spec)
+            }
+        )
+
+    @staticmethod
+    def _read_stems(graph_spec: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+        """The stems a graph separates out, in order, deduplicated.
+
+        Plans that edit the full mix have no separate block and yield nothing,
+        which leaves the stem check with nothing to enforce.
+        """
+        return tuple(
+            dict.fromkeys(
+                str(block["description"])
+                for block in graph_spec
+                if block.get("kind") == "separate" and block.get("description")
+            )
         )
 
     def _banded_descriptor(
@@ -835,10 +913,16 @@ class AbstractionLadder:
                 text=text,
                 operators=profile.operators,
                 operator_tags=profile.operator_tags,
+                operator_names=profile.operator_names,
                 exempt_tags=checks.get("mention_exempt_tags", [])
             )
             if missing:
                 violations.append("did not name operator(s) %s" % ", ".join(missing))
+
+        if checks.get("must_mention_stems"):
+            missing_stems = self._missing_stems(text, profile.stem_names)
+            if missing_stems:
+                violations.append("did not name stem(s) %s" % ", ".join(missing_stems))
 
         if checks.get("must_contain_all_param_values"):
             missing_values = self._missing_values(text, profile)
@@ -852,6 +936,7 @@ class AbstractionLadder:
         text: str,
         operators: Sequence[str],
         operator_tags: Mapping[str, tuple[str, ...]],
+        operator_names: Mapping[str, tuple[str, ...]],
         exempt_tags: Sequence[str]
     ) -> list[str]:
         normalized = NON_ALNUM_RE.sub("", text.lower())
@@ -862,9 +947,26 @@ class AbstractionLadder:
                 continue
             if exempt.intersection(operator_tags.get(operator, ())):
                 continue
-            if not any(token in normalized for token in self._operator_tokens(operator)):
+            accepted = (
+                *self._operator_tokens(operator),
+                *operator_names.get(operator, ())
+            )
+            if not any(token in normalized for token in accepted):
                 missing.append(operator)
         return missing
+
+    @staticmethod
+    def _missing_stems(
+        text: str,
+        stem_names: Mapping[str, tuple[str, ...]]
+    ) -> list[str]:
+        normalized = NON_ALNUM_RE.sub("", text.lower())
+        return [
+            stem
+            for stem, accepted in stem_names.items()
+            # No accepted words means the stem is exempt, not that it is missing.
+            if accepted and not any(token in normalized for token in accepted)
+        ]
 
     @staticmethod
     def _operator_tokens(operator: str) -> tuple[str, ...]:
