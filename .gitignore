@@ -16,3 +16,4 @@ failed_render.txt
 scripts/*.sh
 scripts/*.sbatch
 *.claude
+.env
