@@ -211,7 +211,8 @@ def build_tagged_manifest_row(
         tempo_bpm=analysis.get("tempo_bpm"),
         key_name=analysis.get("key"),
         mode_name=analysis.get("mode"),
-        issues=analysis.get("issues") or ()
+        issues=analysis.get("issues") or (),
+        caption=analysis.get("caption")
     )
     row["analysis"]["instrument_tagger"] = {
         "model_id": model_id,
