@@ -1,344 +1,1430 @@
-# Leaf nodes under `distributions` are the only nodes that can be referenced by
-# `sample: ...`. Grouping nodes are just for organization.
-#
-# Editing guideline:
-# - keep related priors together by workflow or source family
-# - use choice distributions for explicit, human-auditable supports
-# - bias with weights instead of hiding values in code
+# User-selected edit constraints, not empirical source limits: high-shelf gain magnitude 5–18 dB, compressor threshold -40 to -10 dB, ratio 1–10. Raw source records are preserved; fits condition on eligible settings.
 distributions:
-  # Time-based send/return defaults used for general ambience recipes.
   space:
     shared_send:
-      # Bus balance priors.
       send_level:
         type: uniform
         low: 0.3
         high: 0.8
-        samples: [0.3, 0.5, 0.8]
       return_level:
         type: uniform
         low: 0.6
         high: 1.15
-        samples: [0.6, 0.85, 1.15]
-      # Delay timing priors. We keep both synced and free-time options, with
-      # synced variants preferred by default.
       delay:
         synced:
-          # Beats are measured in quarter-note units:
-          # 0.5=eighth, 0.75=dotted eighth, 1.0=quarter.
           beats:
             type: choice
             values:
-              - value: 0.5
-                weight: 2.0
-              - value: 0.75
-                weight: 3.0
-              - value: 1.0
-                weight: 1.0
-              - value: 1.5
-                weight: 0.8
+            - value: 0.5
+              weight: 2.0
+            - value: 0.75
+              weight: 3.0
+            - value: 1.0
+              weight: 1.0
+            - value: 1.5
+              weight: 0.8
         free:
           seconds:
             type: uniform
             low: 0.12
             high: 0.75
-            samples: [0.12, 0.25, 0.45, 0.75]
       feedback:
         type: uniform
         low: 0.0
         high: 0.45
-        samples: [0.0, 0.18, 0.35, 0.45]
       reverb:
         room_size:
           type: uniform
           low: 0.25
           high: 0.95
-          samples: [0.25, 0.5, 0.75, 0.95]
         damping:
           type: uniform
           low: 0.25
           high: 0.8
-          samples: [0.25, 0.55, 0.8]
       post_eq:
-        # Standard “filter the wet path” cleanup.
         highpass_hz:
           type: choice
           values:
-            - value: 700.0
-              weight: 1.0
-            - value: 1000.0
-              weight: 1.0
+          - value: 700.0
+            weight: 1.0
+          - value: 1000.0
+            weight: 1.0
         lowpass_hz:
           type: choice
           values:
-            - value: 2200.0
-              weight: 1.0
-            - value: 3000.0
-              weight: 1.0
-  # Stem rebalance priors.
+          - value: 2200.0
+            weight: 1.0
+          - value: 3000.0
+            weight: 1.0
   balance:
     target_gain:
       up_db:
         type: choice
         values:
-          - value: 3.0
-            weight: 2.0
-          - value: 5.0
-            weight: 2.0
-          - value: 7.0
-            weight: 1.0
+        - value: 3.0
+          weight: 2.0
+        - value: 5.0
+          weight: 2.0
+        - value: 7.0
+          weight: 1.0
       down_db:
         type: choice
         values:
-          - value: -3.0
-            weight: 2.0
-          - value: -5.0
-            weight: 2.0
-          - value: -7.0
-            weight: 1.0
-  # Problem-oriented cleanup priors.
+        - value: -3.0
+          weight: 2.0
+        - value: -5.0
+          weight: 2.0
+        - value: -7.0
+          weight: 1.0
   cleanup:
     vocal_sibilance:
       cut_hz:
         type: choice
         values:
-          - value: 3800.0
-            weight: 1.0
-          - value: 4500.0
-            weight: 1.0
+        - value: 3800.0
+          weight: 1.0
+        - value: 4500.0
+          weight: 1.0
       cut_db:
         type: choice
         values:
-          - value: -3.0
-            weight: 2.0
-          - value: -5.0
-            weight: 1.0
+        - value: -3.0
+          weight: 2.0
+        - value: -5.0
+          weight: 1.0
       q:
         type: choice
         values:
-          - value: 2.5
-            weight: 1.0
-          - value: 4.0
-            weight: 1.0
+        - value: 2.5
+          weight: 1.0
+        - value: 4.0
+          weight: 1.0
     hum:
-      # Placeholder until a dedicated hum-removal operator exists.
       highpass_hz:
         type: choice
         values:
-          - value: 50.0
-            weight: 1.0
-          - value: 60.0
-            weight: 1.0
+        - value: 50.0
+          weight: 1.0
+        - value: 60.0
+          weight: 1.0
     rumble:
       highpass_hz:
         type: choice
         values:
-          - value: 30.0
-            weight: 1.0
-          - value: 40.0
-            weight: 1.0
-          - value: 50.0
-            weight: 0.8
-  # Drum-specific dynamics priors favoring parallel treatment.
+        - value: 30.0
+          weight: 1.0
+        - value: 40.0
+          weight: 1.0
+        - value: 50.0
+          weight: 0.8
   drums:
     parallel_compression:
       send_level:
         type: choice
         values:
-          - value: 0.6
-            weight: 1.0
-          - value: 0.85
-            weight: 2.0
+        - value: 0.6
+          weight: 1.0
+        - value: 0.85
+          weight: 2.0
       return_level:
         type: choice
         values:
-          - value: 0.3
-            weight: 1.0
-          - value: 0.5
-            weight: 2.0
+        - value: 0.3
+          weight: 1.0
+        - value: 0.5
+          weight: 2.0
       threshold_db:
         type: choice
         values:
-          - value: -28.0
-            weight: 1.0
-          - value: -36.0
-            weight: 1.0
+        - value: -28.0
+          weight: 1.0
+        - value: -36.0
+          weight: 1.0
       ratio:
         type: choice
         values:
-          - value: 6.0
-            weight: 1.0
-          - value: 12.0
-            weight: 1.0
+        - value: 6.0
+          weight: 1.0
     distortion:
       drive_db:
         type: choice
         values:
-          - value: 6.0
-            weight: 2.0
-          - value: 10.0
-            weight: 2.0
-          - value: 14.0
-            weight: 1.0
-  # Vocal-specific priors.
+        - value: 6.0
+          weight: 2.0
+        - value: 10.0
+          weight: 2.0
+        - value: 14.0
+          weight: 1.0
   vocals:
     compression:
-      # Conservative control compression for pop-style leveling.
+      # Inferred from MixParams, see zero-based rows 2,6,14,20,24,32,42,46-47,55,58,75,88,120,147,184,195,197-198,206,210,214,217,219,224,226,229,231-232,234,250,252,259,269,271,281-282 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 4,9,22,27,38,40,43,53,57,64,72-73,75-76,87,95,97,114,116,122,124,142-144,167-168,175,206,213,222,224,228-230,235,251,257,264,274-275,278,283-284,293-294,297,301,315,320,331,333,335,340,344,351,355,357,363,389,392,397-398,403,415,420-421,423,427,431,437,440-441,445,449,453-454,457,467,472-473,490,493,497 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 13,18,22,26,35,37,42-43,47,50,55-56,60,72,75,94,104,112,117,133,136,139,148,154-155,157-158,173,180,193,201,205,208,214,226,231,233,238,244,251,265,269,273,275,279,294-295,300-301,322,339,344,351,362,364,368,372,385,400,406-408,412,422,434-435,444,455,467,472,485,489,491,499,501,508,512,514-515,521,532,538,543-544,553,574,579,587,597,613-614,620,629,643,649-650,653,658,663-664,683,698,712,717,719,721-722,730,743,752-753,756,770,774,783,786,798-799,801,807,809,814,820,824,830,838-839,843,847,851,854,858,872,877,885,890,903,920,924,939,948,952,957,960,964,967,970,972,985,987,994-995,997-998,1004,1007,1010,1017,1021,1030,1036,1038,1052,1059-1060,1062,1072,1074,1079,1095,1101,1114,1128,1134,1138,1146,1168,1172,1175,1184,1190,1193,1207,1210,1219-1221,1232,1234,1250,1254,1260,1262,1265,1271,1274,1278,1280,1282,1285,1292,1297,1311,1315,1321,1346-1347,1351,1368,1374,1377,1381,1383,1394-1397,1400,1407,1418,1422,1428,1431,1438,1453,1456,1458,1479,1489,1492,1496,1498-1499,1505,1518-1519,1539 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
       threshold_db:
-        type: choice
-        values:
-          - value: -24.0
-            weight: 1.0
-          - value: -30.0
-            weight: 1.0
+        high: -10.134999999999726
+        low: -39.02964705882353
+        mean: -25.071565848145916
+        scale: linear
+        std: 7.056031677772144
+        type: normal
+      # Inferred from MixParams, see zero-based rows 2,6,14,20,24,32,42,46-47,55,58,67,75,88,106,120,134,147,184,195,197-198,206,210,214,217,219,224,226,229,231-232,234,242,250,252,259-260,268-269,271,281-282 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 4,9,22,27,32,38,40,43,53,57,64,72-73,75-76,87,90,95,97,114,116-117,122,124,142-144,149,167-168,175-176,206,213,222,224,228-230,235-236,251,257,274-275,278,283-284,294,297,301,315,320,331,333,335,340,344,351,355,357,363,388-389,392,397-398,403,415,420-421,423,427,431,437,440-441,443,445,449,453-454,457,467,472-473,490,493,495,497 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 13,18,22,26,35,37,42-43,47,50,55-56,60,72,75,91,94,104,112,117,133,136,139,148,154-158,173,180,182,193,201,205,208,214,226,231,233,238,244,251,265,269,273,275,279,287,294-295,300-301,322,339,344,351,362,364,368,372,385,398,400,406-408,412,422,433-435,444,455,467,472,485,489,491,499,501,508,512,514-515,521,532,538,543-544,553,574,579,587,597,613-614,620,629,643,649-650,653,658,663-664,683,698,700,712,717,719,721-722,730,743,749,752-753,756,763,770,774,783,786,798-799,801,807,809,814,820,824,830,838-839,843,847,851,854,858,872,877,885,890,903,920,924,939,948,952,957,960,964,967,970,972,985,987,994-995,997-998,1004,1007,1010,1017,1021,1030-1031,1036,1038,1041,1052,1059-1060,1062,1072,1074,1079,1095,1101,1114,1128,1134,1138,1146,1168,1172,1175,1184,1190,1193-1194,1207-1208,1210,1219-1221,1232,1234,1250,1254,1260,1262,1265,1271,1274,1278,1280,1282,1285,1292,1297,1311,1315,1321,1346-1347,1351,1368,1374,1377,1381-1383,1394-1395,1397,1400-1401,1407,1418,1422,1431,1438,1453,1456,1458,1479,1489,1492,1496,1498-1499,1505,1518-1519,1539 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
       ratio:
-        type: choice
-        values:
-          - value: 4.0
-            weight: 1.0
-          - value: 8.0
-            weight: 1.0
+        edges:
+        - 1.4
+        - 1.7616611025833946
+        - 2.216749885968101
+        - 2.7894014630472705
+        - 3.509985754956849
+        - 4.416718125092351
+        - 5.5576860871787535
+        - 6.993399571536939
+        - 8.8
+        high: 8.8
+        low: 1.4
+        scale: log
+        type: histogram
+        weights:
+        - 0.09358215792092016
+        - 0.31429962173311543
+        - 0.04518602498227432
+        - 0.20451578182179722
+        - 0.16274792860549084
+        - 0.058655059951820944
+        - 0.04892067162946353
+        - 0.07209275335511756
       attack_ms:
         type: choice
         values:
-          - value: 5.0
-            weight: 1.0
-          - value: 10.0
-            weight: 1.0
+        - value: 5.0
+          weight: 1.0
+        - value: 10.0
+          weight: 1.0
       release_ms:
         type: choice
         values:
-          - value: 40.0
-            weight: 1.0
-          - value: 80.0
-            weight: 1.0
+        - value: 40.0
+          weight: 1.0
+        - value: 80.0
+          weight: 1.0
+      # Inferred from MixParams for threshold_db, ratio, see zero-based rows 2,6,14,20,24,32,42,46-47,55,58,75,88,120,147,184,195,197-198,206,210,214,217,219,224,226,229,231-232,234,250,252,259,269,271,281-282 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams for threshold_db, ratio, see zero-based rows 4,9,22,27,38,40,43,53,57,64,72-73,75-76,87,95,97,114,116,122,124,142-144,167-168,175,206,213,222,224,228-230,235,251,257,274-275,278,283-284,294,297,301,315,320,331,333,335,340,344,351,355,357,363,389,392,397-398,403,415,420-421,423,427,431,437,440-441,445,449,453-454,457,467,472-473,490,493,497 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams for threshold_db, ratio, see zero-based rows 13,18,22,26,35,37,42-43,47,50,55-56,60,72,75,94,104,112,117,133,136,139,148,154-155,157-158,173,180,193,201,205,208,214,226,231,233,238,244,251,265,269,273,275,279,294-295,300-301,322,339,344,351,362,364,368,372,385,400,406-408,412,422,434-435,444,455,467,472,485,489,491,499,501,508,512,514-515,521,532,538,543-544,553,574,579,587,597,613-614,620,629,643,649-650,653,658,663-664,683,698,712,717,719,721-722,730,743,752-753,756,770,774,783,786,798-799,801,807,809,814,820,824,830,838-839,843,847,851,854,858,872,877,885,890,903,920,924,939,948,952,957,960,964,967,970,972,985,987,994-995,997-998,1004,1007,1010,1017,1021,1030,1036,1038,1052,1059-1060,1062,1072,1074,1079,1095,1101,1114,1128,1134,1138,1146,1168,1172,1175,1184,1190,1193,1207,1210,1219-1221,1232,1234,1250,1254,1260,1262,1265,1271,1274,1278,1280,1282,1285,1292,1297,1311,1315,1321,1346-1347,1351,1368,1374,1377,1381,1383,1394-1395,1397,1400,1407,1418,1422,1431,1438,1453,1456,1458,1479,1489,1492,1496,1498-1499,1505,1518-1519,1539 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
+      settings:
+        components:
+        - parameters:
+            ratio:
+              edges:
+              - 3.1791146090136504
+              - 3.61827167106773
+              - 4.118093084323608
+              - 4.686958911006679
+              - 5.3344068197703365
+              - 6.071291995325054
+              - 6.9099691376903705
+              - 7.8644996024898015
+              - 8.95088715522621
+              high: 8.950887155226209
+              low: 3.1791146090136504
+              scale: log
+              type: histogram
+              weights:
+              - 0.12925706654017305
+              - 0.21505169339127486
+              - 0.12766999633798395
+              - 0.14139795293346605
+              - 0.0
+              - 0.06383499816899198
+              - 0.0
+              - 0.3227882926281101
+            threshold_db:
+              edges:
+              - -38.4
+              - -36.85473385343213
+              - -35.309467706864254
+              - -33.764201560296385
+              - -32.218935413728516
+              - -30.673669267160644
+              - -29.128403120592772
+              - -27.583136974024903
+              - -26.03787082745703
+              high: -26.03787082745703
+              low: -38.4
+              scale: linear
+              type: histogram
+              weights:
+              - 0.28947188359964743
+              - 0.09807078308639436
+              - 0.08444984099106177
+              - 0.3477273056440821
+              - 0.0
+              - 0.007795369937636519
+              - 0.09958707664040287
+              - 0.07289774010077497
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.15279835386230814
+        - parameters:
+            ratio:
+              edges:
+              - 1.2
+              - 1.3751476052043086
+              - 1.575859113415954
+              - 1.8058657382944454
+              - 2.0694432877800977
+              - 2.3714916510807766
+              - 2.717625887288118
+              - 3.114280608954575
+              - 3.5688296011150835
+              high: 3.5688296011150835
+              low: 1.2
+              scale: log
+              type: histogram
+              weights:
+              - 0.03892607127964432
+              - 0.13577784386828318
+              - 0.06528226537523692
+              - 0.21529512678475457
+              - 0.31978554394493075
+              - 0.09488885637069637
+              - 0.11382509600993533
+              - 0.016219196366518574
+            threshold_db:
+              edges:
+              - -21.22374000074367
+              - -19.820772500650712
+              - -18.417805000557752
+              - -17.014837500464793
+              - -15.611870000371836
+              - -14.208902500278876
+              - -12.805935000185919
+              - -11.40296750009296
+              - -10.0
+              high: -10.0
+              low: -21.22374000074367
+              scale: linear
+              type: histogram
+              weights:
+              - 0.152515714852739
+              - 0.36934422800401245
+              - 0.04843599261863951
+              - 0.10269692469101166
+              - 0.022488139430082543
+              - 0.10379141275422676
+              - 0.10425923568383155
+              - 0.09646835196545656
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.24578041775007917
+        - parameters:
+            ratio:
+              edges:
+              - 1.5
+              - 1.6357615989978864
+              - 1.7838106725040817
+              - 1.9452593319765146
+              - 2.121320343559643
+              - 2.3133162381119114
+              - 2.5226892457611436
+              - 2.751012129614014
+              - 3.0000000000000004
+              high: 3.0
+              low: 1.5
+              scale: log
+              type: histogram
+              weights:
+              - 0.05624689800073876
+              - 0.03448352814496465
+              - 0.46201811933941156
+              - 0.30229125154630493
+              - 0.02946694150086387
+              - 0.039816403970936255
+              - 0.036152796285299035
+              - 0.03952406121148092
+            threshold_db:
+              edges:
+              - -38.2
+              - -36.49283145658246
+              - -34.78566291316492
+              - -33.078494369747375
+              - -31.371325826329834
+              - -29.664157282912292
+              - -27.956988739494747
+              - -26.249820196077206
+              - -24.542651652659664
+              high: -24.542651652659664
+              low: -38.2
+              scale: linear
+              type: histogram
+              weights:
+              - 0.10677547411297525
+              - 0.054083619559688254
+              - 0.05231097918616011
+              - 0.04077838856966015
+              - 0.41303718996876077
+              - 0.08334208302187152
+              - 0.144713116471358
+              - 0.10495914910952595
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.24999444748262556
+        - parameters:
+            ratio:
+              edges:
+              - 2.9587696960661267
+              - 3.3126793795781384
+              - 3.708921544813923
+              - 4.15255974073069
+              - 4.6492631866125
+              - 5.20537921859896
+              - 5.828014401818434
+              - 6.525125344651651
+              - 7.3056203756343745
+              high: 7.305620375634374
+              low: 2.9587696960661267
+              scale: log
+              type: histogram
+              weights:
+              - 0.43455138093967904
+              - 0.08216027594628592
+              - 0.1497317331226417
+              - 0.16224791585437964
+              - 0.029514346201929175
+              - 0.09869737914430834
+              - 0.03192368058576013
+              - 0.011173288205016067
+            threshold_db:
+              edges:
+              - -29.4
+              - -27.287499999999998
+              - -25.174999999999997
+              - -23.0625
+              - -20.95
+              - -18.8375
+              - -16.725
+              - -14.6125
+              - -12.5
+              high: -12.5
+              low: -29.4
+              scale: linear
+              type: histogram
+              weights:
+              - 0.13192327600836934
+              - 0.06363395990155524
+              - 0.447497674527237
+              - 0.1599544069407621
+              - 0.052343238525294496
+              - 0.010975195174658493
+              - 0.05037333169907372
+              - 0.08329891722304965
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.351426780904987
+        type: joint
     harmony:
       intervals:
         type: choice
         values:
-          - value: 3.0
-            weight: 4.0
-          - value: 5.0
-            weight: 1.5
-          - value: 7.0
-            weight: 1.0
-          - value: -3.0
-            weight: 2.0
-          - value: -5.0
-            weight: 1.2
-          - value: -7.0
-            weight: 0.8
+        - value: 3.0
+          weight: 4.0
+        - value: 5.0
+          weight: 1.5
+        - value: 7.0
+          weight: 1.0
+        - value: -3.0
+          weight: 2.0
+        - value: -5.0
+          weight: 1.2
+        - value: -7.0
+          weight: 0.8
       backoff_db:
         type: uniform
         low: -6.0
         high: -1.0
-        samples: [-6.0, -4.0, -2.5, -1.0]
       post_eq:
         highpass_hz:
           type: choice
           values:
-            - value: 300.0
-              weight: 1.0
-            - value: 500.0
-              weight: 1.0
-            - value: 700.0
-              weight: 0.8
+          - value: 300.0
+            weight: 1.0
+          - value: 500.0
+            weight: 1.0
+          - value: 700.0
+            weight: 0.8
         lowpass_hz:
           type: choice
           values:
-            - value: 4500.0
-              weight: 1.0
-            - value: 6500.0
-              weight: 1.0
-            - value: 8500.0
-              weight: 0.8
-  # Synthetic poison priors paired with cleanup recipes.
+          - value: 4500.0
+            weight: 1.0
+          - value: 6500.0
+            weight: 1.0
+          - value: 8500.0
+            weight: 0.8
   poison:
     noise:
       hum_level_db:
         type: choice
         values:
-          - value: -30.0
-            weight: 1.0
-          - value: -24.0
-            weight: 1.0
+        - value: -30.0
+          weight: 1.0
+        - value: -24.0
+          weight: 1.0
       hum_modulation_hz:
         type: choice
         values:
-          - value: 0.2
-            weight: 1.0
-          - value: 0.35
-            weight: 1.0
+        - value: 0.2
+          weight: 1.0
+        - value: 0.35
+          weight: 1.0
       rumble_level_db:
         type: choice
         values:
-          - value: -24.0
-            weight: 1.0
-          - value: -18.0
-            weight: 1.0
+        - value: -24.0
+          weight: 1.0
+        - value: -18.0
+          weight: 1.0
       rumble_highpass_hz:
         type: choice
         values:
-          - value: 18.0
-            weight: 1.0
-          - value: 24.0
-            weight: 1.0
+        - value: 18.0
+          weight: 1.0
+        - value: 24.0
+          weight: 1.0
       rumble_lowpass_hz:
         type: choice
         values:
-          - value: 35.0
-            weight: 1.0
-          - value: 45.0
-            weight: 1.0
+        - value: 35.0
+          weight: 1.0
+        - value: 45.0
+          weight: 1.0
       rumble_modulation_hz:
         type: choice
         values:
-          - value: 0.2
-            weight: 1.0
-          - value: 0.35
-            weight: 1.0
-  # Tonal / color-shaping priors.
+        - value: 0.2
+          weight: 1.0
+        - value: 0.35
+          weight: 1.0
   tone:
     retro:
-      # Gentle “older playback chain” rolloff / dulling.
       shelf_cut_hz:
         type: choice
         values:
-          - value: 5000.0
-            weight: 1.0
-          - value: 8000.0
-            weight: 1.0
+        - value: 5000.0
+          weight: 1.0
+        - value: 8000.0
+          weight: 1.0
       shelf_gain_db:
         type: choice
         values:
-          - value: -5.0
-            weight: 1.0
-          - value: -8.0
-            weight: 1.0
+        - value: -5.0
+          weight: 1.0
+        - value: -8.0
+          weight: 1.0
       lowpass_hz:
         type: choice
         values:
-          - value: 6500.0
-            weight: 1.0
-          - value: 8500.0
-            weight: 1.0
+        - value: 6500.0
+          weight: 1.0
+        - value: 8500.0
+          weight: 1.0
     modulation:
       chorus:
-        # Current operator support is chorus-only here; expand when more motifs land.
         mix:
           type: uniform
           low: 0.25
           high: 0.6
-          samples: [0.25, 0.4, 0.6]
         depth:
           type: uniform
           low: 0.3
           high: 0.65
-          samples: [0.3, 0.45, 0.65]
         rate_hz:
           type: choice
           values:
-            - value: 0.35
-              weight: 1.0
-            - value: 0.9
-              weight: 1.0
+          - value: 0.35
+            weight: 1.0
+          - value: 0.9
+            weight: 1.0
+        centre_delay_ms:
+          type: uniform
+          low: 20
+          high: 50
+    equalization:
+      highpass:
+        # Inferred from MixParams, see zero-based rows 1-2,7-12,14,17,19,22,24,32,34-38,46-47,51,56,61,65,73,76,87-88,91,95,99,101,108,112,120,122-123,126-127,130,135,143,145,147,150,152-153,159-160,162,164,168,170,173,175-176,179,182-183,185,191-192,195,197,201,208-211,213,219-220,226,230,233,236,239,242,245,247-248,250,255,260-262,264,268,274-276,279-281,283,285,287,289-291,294-295 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 1,6,11-13,21-22,25,28,33,40,43,45,49-50,57,59,61,64,66-67,70,74,77,83-84,90,92,96-97,100,103-105,108,111-114,118,131,134-135,138-139,142,147-148,151,156,159-160,166,169-170,175,177,179,183,185-187,189,195,199-200,203,206,209-210,212-213,221,224,227,231-233,240-241,251-252,254,257-261,264,268,273-275,281,283-284,291,293-296,298,301,303,305-306,309,311,318,320,323,326,331-335,338-339,346,355-356,363,366-369,371,373,375-376,378,381,384-385,388,390,392,397,399,402,404,409,411,414,417-418,423-424,431,434-435,437-439,446,448,450,456,464,473,477,481,486,488,490-492,495-496,498 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 1-2,4-5,10-11,15-16,18-19,21-22,26-27,30,33,36,38,41-42,47,50,54,58-60,72,76-77,81,83,86,88,91,94,98,104-105,108-109,112,114,122,130-134,137-138,150,158-159,165-167,173,182,185,187,189,193,199-200,202,206-209,211-212,215,220,222,226-227,230,237,243,247,250,252-254,259,261,265,269-270,278-279,283,287-289,292,294,301,311-312,314-316,319,322,324,326,331,333,336-337,339,341-342,347,357-358,362,370,379,385,387,389,395,400,405,407,409,411-412,416-417,428-429,436-437,440,443-444,456,458,463-464,466-468,470,478,480,482,485,488-489,495-497,499-500,502-503,506-507,509,514,519,522-524,527,529,531-532,538,541,544,551,555-556,559,564-565,567-569,571-576,581,587,589-593,599,607,613-614,617,631,636,639-642,646-648,650,656-658,661-662,666-667,669,674,677,681,683-684,692,696-697,703-704,709,712,717,720,729,732,735-736,741,747-749,752,756,758-759,764,767,770-771,774,779,781,783,785-786,789-790,792-795,797-798,802,806,809,811,814-815,818-819,823-825,828,830-831,837-838,840,843,849,854,856-857,864,867-868,878-879,881,890-894,896,901,903,906-909,916-917,921,924,926,929-930,932,934-935,939-940,947,950-951,954,962,964-965,969-970,972,983-984,987,994-996,1008-1009,1011,1017,1023-1025,1027,1030,1032,1035,1044,1048,1052,1056,1061-1064,1066,1071,1075,1081-1082,1086,1088,1094,1103,1108,1114,1120-1121,1124-1125,1128,1133-1136,1138,1141-1142,1146,1149-1151,1153,1156,1165,1170,1172,1174-1175,1177,1179-1182,1188-1189,1193,1195,1197,1201,1205,1207,1210,1215,1217-1218,1221,1224,1234-1237,1247,1249-1250,1254-1255,1260,1262,1267-1268,1270-1271,1274,1278,1283,1286,1288-1291,1293,1297-1298,1300-1301,1303,1306-1307,1309,1311,1317,1320-1322,1327-1328,1330,1336,1339-1340,1346-1348,1351-1355,1369,1377,1379-1380,1382-1383,1391-1392,1394,1397,1399-1401,1405,1407,1412,1414,1416,1426-1427,1429,1434-1435,1437,1443,1445-1450,1453,1458,1463,1470-1472,1475,1477-1479,1483,1486-1487,1496-1497,1499,1505,1511,1513,1515-1516,1519,1526-1527,1529-1530,1532,1534,1540,1542 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
+        cutoff_frequency_hz:
+          edges:
+          - 19.999999999999996
+          - 41.44072255575086
+          - 85.86667429713594
+          - 177.91885131663165
+          - 368.65428774252086
+          - 763.865002866288
+          - 1582.7558826914847
+          - 3279.5273704050173
+          - 6795.299193547273
+          high: 6795.299193547273
+          low: 20.0
+          scale: log
+          type: histogram
+          weights:
+          - 0.16605154130850952
+          - 0.261303590818583
+          - 0.3775530994702336
+          - 0.11006070965205172
+          - 0.061969356144052475
+          - 0.015895990429657964
+          - 0.0035695052459795464
+          - 0.0035962069309322144
+      highshelf:
+        # Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 20,36,41,62,67,74,92,106,117,134,139,143,153,161-162,167,186,190,198,226,247,255-256,291 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 9,20,24,32,34,67,69,74,90,135,146,149,151,155,191,199,207,228,236,245,258-260,273,278,288,301,304,310,329,331,345,375,392,397,404,419,443,481 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 1,3,15,20-21,32,41,94,117,143,151,166,180-182,193,208,219,227,240,247,253,289,301,308,330,339,344,350,356,382,388,412,435,462-463,478,530,564,588,593,604,607,622,641,646-647,657-658,661,710,718,730,732,749,779,785,809,811,848,904-905,915,959,975,977,1031,1036,1046,1075,1082,1087,1103,1110,1113,1144,1170,1194,1200,1204,1215-1216,1234,1247,1250,1274,1287,1306-1307,1332,1335,1355,1360,1367,1369,1427,1456,1465-1466,1470-1471,1494,1537,1541 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
+        settings:
+          components:
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 1800.0000000000005
+                - 2432.1602786526623
+                - 3286.3353450309946
+                - 4440.4968269537085
+                - 5999.999999999995
+                - 8107.2009288422005
+                - 10954.451150103314
+                - 14801.656089845694
+                - 19999.99999999998
+                high: 20000.0
+                low: 1800.0
+                scale: log
+                type: histogram
+                weights:
+                - 0.2491182473072844
+                - 0.022766518207344082
+                - 0.055039934127645046
+                - 0.08376911186548401
+                - 0.13508134136357497
+                - 0.14476567044312744
+                - 0.1170849507806267
+                - 0.19237422590491335
+              gain_db:
+                edges:
+                - -12.0
+                - -11.1875
+                - -10.375
+                - -9.5625
+                - -8.75
+                - -7.9375
+                - -7.125
+                - -6.3125
+                - -5.5
+                high: -5.5
+                low: -12.0
+                scale: linear
+                type: histogram
+                weights:
+                - 0.6290814289271067
+                - 0.07057620644276676
+                - 0.0
+                - 0.019263976944675746
+                - 0.0847385652506868
+                - 0.013180615804251785
+                - 0.08849842039997637
+                - 0.09466078623053588
+              q:
+                type: choice
+                values:
+                - value: 0.5
+                  weight: 0.1398027809760656
+                - value: 0.72
+                  weight: 0.03412819229697687
+                - value: 0.75
+                  weight: 0.052151685877790926
+                - value: 1.0
+                  weight: 0.7739173408491665
+            weight: 0.3071619001780945
+          - parameters:
+              cutoff_frequency_hz:
+                type: choice
+                values:
+                - value: 72.7
+                  weight: 0.1619593998234775
+                - value: 376.6
+                  weight: 0.09841129744042365
+                - value: 461.8
+                  weight: 0.10370697263901149
+                - value: 1800.0
+                  weight: 0.10370697263901149
+                - value: 2540.0
+                  weight: 0.43380406001765226
+                - value: 4270.0
+                  weight: 0.09841129744042365
+              gain_db:
+                type: choice
+                values:
+                - value: -12.0
+                  weight: 0.1619593998234775
+                - value: -7.4
+                  weight: 0.10370697263901149
+                - value: -7.1
+                  weight: 0.43380406001765226
+                - value: -6.6
+                  weight: 0.10370697263901149
+                - value: -5.4
+                  weight: 0.09841129744042365
+                - value: -5.1
+                  weight: 0.09841129744042365
+              q:
+                type: choice
+                values:
+                - value: 0.1
+                  weight: 0.10309754969949145
+                - value: 0.27
+                  weight: 0.454461396208969
+                - value: 0.5
+                  weight: 0.16412390198797966
+                - value: 0.61
+                  weight: 0.10864539990753584
+                - value: 1.0
+                  weight: 0.16967175219602404
+            weight: 0.09603729603729604
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 2819.9999999999986
+                - 3602.439693336183
+                - 4601.975795788688
+                - 5878.8440689792715
+                - 7509.993342207437
+                - 9593.7227349853
+                - 12255.605527437174
+                - 15656.05667301774
+                - 19999.99999999998
+                high: 20000.0
+                low: 2820.0
+                scale: log
+                type: histogram
+                weights:
+                - 0.030170356468073225
+                - 0.09578560724828841
+                - 0.16519186270211444
+                - 0.15206492604450217
+                - 0.15049838830481338
+                - 0.16584026071392788
+                - 0.0603407129361464
+                - 0.1801078855821341
+              gain_db:
+                edges:
+                - 5.0
+                - 6.1875
+                - 7.375
+                - 8.5625
+                - 9.75
+                - 10.9375
+                - 12.125
+                - 13.3125
+                - 14.5
+                high: 14.5
+                low: 5.0
+                scale: linear
+                type: histogram
+                weights:
+                - 0.4827007128309203
+                - 0.11081718029553787
+                - 0.13051317635115425
+                - 0.05395937613401946
+                - 0.053199384920864165
+                - 0.12321069667819197
+                - 0.022799736394655976
+                - 0.022799736394655976
+              q:
+                edges:
+                - 0.7292822674100093
+                - 0.8936770498970563
+                - 1.0951296983390004
+                - 1.341993795546411
+                - 1.6445059886665352
+                - 2.015210469478337
+                - 2.4694791410203765
+                - 3.0261490401612314
+                - 3.708303447942824
+                high: 3.708303447942824
+                low: 0.7292822674100093
+                scale: log
+                type: histogram
+                weights:
+                - 0.20553802955501435
+                - 0.7400132493128659
+                - 0.007778388733159949
+                - 0.0
+                - 0.046670332398959694
+                - 0.0
+                - 0.0
+                - 0.0
+            weight: 0.36423205674217785
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 2100.0
+                - 2783.368015657956
+                - 3689.113100279861
+                - 4889.599718792256
+                - 6480.740698407863
+                - 8589.660179867255
+                - 11384.850195244431
+                - 15089.632331666933
+                - 19999.99999999998
+                high: 20000.0
+                low: 2100.0
+                scale: log
+                type: histogram
+                weights:
+                - 0.13404246901299385
+                - 0.03307541443177771
+                - 0.0
+                - 0.2854911668899199
+                - 0.0631439730061211
+                - 0.16852711162858172
+                - 0.28264445059882803
+                - 0.033075414431777736
+              gain_db:
+                edges:
+                - 5.0
+                - 5.522220727272726
+                - 6.044441454545453
+                - 6.566662181818178
+                - 7.088882909090905
+                - 7.611103636363631
+                - 8.133324363636357
+                - 8.655545090909083
+                - 9.17776581818181
+                high: 9.17776581818181
+                low: 5.0
+                scale: linear
+                type: histogram
+                weights:
+                - 0.303328367337939
+                - 0.5734785167971438
+                - 0.0
+                - 0.0
+                - 0.033661395809006636
+                - 0.08352075651858795
+                - 0.0
+                - 0.006010963537322668
+              q:
+                type: choice
+                values:
+                - value: 0.3
+                  weight: 0.26560180729084637
+                - value: 0.36
+                  weight: 0.029039668225443304
+                - value: 0.44
+                  weight: 0.0445658229373731
+                - value: 0.45
+                  weight: 0.01878131600506112
+                - value: 0.46
+                  weight: 0.07251290141884674
+                - value: 0.49
+                  weight: 0.11184582668906888
+                - value: 0.5
+                  weight: 0.4146394499671803
+                - value: 0.64
+                  weight: 0.04301320746618012
+            weight: 0.23256874704243133
+          type: joint
+      lowpass:
+        # Inferred from MixParams, see zero-based rows 11,14,18,27,40,47,54,66,78,88,90-91,97,151,167,230,248,261,275-276 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 2,57,71,89,94,213,232,240,264,280,282,293,303,326,332,359,368-369,411,417,462,487 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams, see zero-based rows 12,32,42,104-105,112,142,163,177,199,232,250,269,278,323,326-327,345,380,384,390,438,474,476,514,517,529,533,551,571,590,595,613,618,631,669,735,739,752,755,770-771,787,790,834,846,849,887,909,916,925,943,958,1008,1044,1080,1098,1111,1121,1125,1133,1155,1157,1161,1185,1192,1222,1293,1298,1317,1319,1353,1356,1358,1375,1390,1432,1436,1458,1463,1524,1528 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
+        cutoff_frequency_hz:
+          edges:
+          - 93.31466666666665
+          - 182.53027994254884
+          - 357.04251310160515
+          - 698.4011430981964
+          - 1366.1234692857493
+          - 2672.2369397252364
+          - 5227.089953857209
+          - 10224.568405421527
+          - 19999.99999999998
+          high: 20000.0
+          low: 93.31466666666665
+          scale: log
+          type: histogram
+          weights:
+          - 0.01944444444444445
+          - 0.034444444444444465
+          - 0.009871794871794877
+          - 0.08092592592592594
+          - 0.12536324786324787
+          - 0.0879700854700854
+          - 0.36294159544159565
+          - 0.2790384615384614
+      lowshelf:
+        # Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 5,15,19,24,30,47,52,54,67,74,77,79,88,98,106,120,129,134,153,161,167,183,190-191,194,206,210,222,240,242,252,259,266,269-270,286,295,299 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 0,20,22,25,27,32,34,45,62,69,76,83,94,108,121,124,135,146,149,152,154,158,167,194,196,199,201,214,218-219,228-229,236,273,278,288,310,314,329,342,345,357,378,384,390-391,396,401,416,436,443-444,446,461,473,480,485 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams for cutoff_frequency_hz, gain_db, q, see zero-based rows 3,9,13,17,32-33,42-43,59,61,69,98,104,112,126,129,131,143,148,151-152,192,211,213,225,235,242,244,250-251,263-264,276-278,287,290,293,297,304,307-308,335,344,356,364,368,380-381,413,422,427,431,439,442,453,460,465,467,469,471,474,479,485,491,493-494,499,509,517,530,545,585,592,596,628,633,646-647,661,677,683,691,704,706,716,730,736,744,768-769,773,780,790,795,799,811,813,830,832,836-837,844,857,859,879,886,889,894,901,920,937,940,946,959,977,1010,1012,1021,1028,1031,1036,1039,1067,1072,1076,1082,1092,1095,1098-1099,1101,1110,1118,1122,1128,1132,1137,1143-1144,1153,1168,1176,1185,1187,1194-1195,1200,1204,1216,1246,1258,1267,1275,1284-1285,1288,1301,1307,1316,1318,1326,1332,1335,1341,1360,1364,1368,1373,1386,1390,1402,1411,1415,1419,1432,1438-1439,1459,1465-1466,1479,1484,1489-1490,1503,1512,1519-1520,1523,1528,1533 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance.
+        settings:
+          components:
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 190.40000000000006
+                - 285.82075531108194
+                - 429.0625218833894
+                - 644.0912504222061
+                - 966.883653807427
+                - 1451.4465138087046
+                - 2178.8526201178615
+                - 3270.805155428663
+                - 4910.0
+                high: 4910.0
+                low: 190.4
+                scale: log
+                type: histogram
+                weights:
+                - 0.1258852404454075
+                - 0.4153552126549243
+                - 0.40588833134500085
+                - 0.0
+                - 0.0
+                - 0.0
+                - 0.0
+                - 0.052871215554667346
+              gain_db:
+                edges:
+                - -12.0
+                - -10.1
+                - -8.2
+                - -6.300000000000001
+                - -4.4
+                - -2.5
+                - -0.6000000000000014
+                - 1.299999999999999
+                - 3.2
+                high: 3.2
+                low: -12.0
+                scale: linear
+                type: histogram
+                weights:
+                - 0.3899278525138742
+                - 0.019539362270203087
+                - 0.0
+                - 0.060394392471536884
+                - 0.19389237146377697
+                - 0.016050190436238232
+                - 0.2247026661073357
+                - 0.09549316473703495
+              q:
+                type: choice
+                values:
+                - value: 0.49
+                  weight: 0.031049021791650824
+                - value: 0.6
+                  weight: 0.03730161771811582
+                - value: 0.74
+                  weight: 0.23440250952063565
+                - value: 0.82
+                  weight: 0.030672092249984496
+                - value: 0.84
+                  weight: 0.031049021791650824
+                - value: 1.0
+                  weight: 0.6076402309324397
+                - value: 2.78
+                  weight: 0.0278855059955227
+            weight: 0.1711663645466769
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 33.10000000000001
+                - 46.81164397685112
+                - 66.2033236198025
+                - 93.62798837989283
+                - 132.41329481293945
+                - 187.26537808414346
+                - 264.8398854400405
+                - 374.54955976100337
+                - 529.7063638434565
+                high: 529.7063638434563
+                low: 33.1
+                scale: log
+                type: histogram
+                weights:
+                - 0.07855860945297542
+                - 0.09032511960331435
+                - 0.09670814216072231
+                - 0.3207403267935144
+                - 0.09422357026651514
+                - 0.2681629172189327
+                - 0.05128131450402566
+                - 0.0
+              gain_db:
+                edges:
+                - -6.1
+                - -3.9304051524998087
+                - -1.7608103049996178
+                - 0.40878454250057317
+                - 2.578379390000764
+                - 4.747974237500955
+                - 6.917569085001146
+                - 9.087163932501337
+                - 11.256758780001528
+                high: 11.256758780001528
+                low: -6.1
+                scale: linear
+                type: histogram
+                weights:
+                - 0.06913538923402543
+                - 0.07803860285318878
+                - 0.016374171134374456
+                - 0.185728778020635
+                - 0.2459979802327792
+                - 0.28822008232426277
+                - 0.041766001734056445
+                - 0.0747389944666779
+              q:
+                type: choice
+                values:
+                - value: 0.1
+                  weight: 0.035397142384854356
+                - value: 0.3
+                  weight: 0.020564192169697824
+                - value: 0.5
+                  weight: 0.9440386654454479
+            weight: 0.16941631397690596
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 42.00000000000001
+                - 50.812982863500466
+                - 61.475219702056975
+                - 74.3747448869178
+                - 89.98101517657554
+                - 108.86199481446933
+                - 131.7048256427168
+                - 159.34083448627823
+                - 192.77578790969332
+                high: 192.77578790969335
+                low: 42.0
+                scale: log
+                type: histogram
+                weights:
+                - 0.058469553055843074
+                - 0.07930492472035347
+                - 0.051119094957394313
+                - 0.2551023652579374
+                - 0.38614383729644386
+                - 0.08303363938581428
+                - 0.05417115569173201
+                - 0.032655429634481634
+              gain_db:
+                edges:
+                - -4.615501077965906
+                - -2.4135634432201676
+                - -0.21162580847442936
+                - 1.9903118262713093
+                - 4.192249461017047
+                - 6.394187095762785
+                - 8.596124730508524
+                - 10.798062365254262
+                - 13.0
+                high: 13.0
+                low: -4.615501077965906
+                scale: linear
+                type: histogram
+                weights:
+                - 0.09364444402835104
+                - 0.21426466076537273
+                - 0.2633291814551357
+                - 0.19116139962336576
+                - 0.11401522701419112
+                - 0.05432252064227579
+                - 0.008900452834317073
+                - 0.06036211363699081
+              q:
+                type: choice
+                values:
+                - value: 0.69
+                  weight: 0.03458136187040647
+                - value: 0.81
+                  weight: 0.016703358145291773
+                - value: 1.0
+                  weight: 0.913401576629706
+                - value: 1.1
+                  weight: 0.01336613078327036
+                - value: 2.0
+                  weight: 0.02194757257132541
+            weight: 0.3499776087949642
+          - parameters:
+              cutoff_frequency_hz:
+                edges:
+                - 21.125402381285138
+                - 28.185851635812
+                - 37.60601659070868
+                - 50.17455218645249
+                - 66.94369452926956
+                - 89.31735395613923
+                - 119.16865021900226
+                - 158.99672981795467
+                - 212.1359942094287
+                high: 212.13599420942873
+                low: 21.12540238128514
+                scale: log
+                type: histogram
+                weights:
+                - 0.054803424596871195
+                - 0.04829308869617903
+                - 0.08218817645442576
+                - 0.06689725179241644
+                - 0.03661680665657618
+                - 0.3792056516308102
+                - 0.08481604818388454
+                - 0.24717955198883662
+              gain_db:
+                edges:
+                - -23.49432093378528
+                - -21.345030817062117
+                - -19.19574070033896
+                - -17.0464505836158
+                - -14.89716046689264
+                - -12.74787035016948
+                - -10.59858023344632
+                - -8.44929011672316
+                - -6.3
+                high: -6.3
+                low: -23.49432093378528
+                scale: linear
+                type: histogram
+                weights:
+                - 0.05021698426390067
+                - 0.0
+                - 0.010043396852780138
+                - 0.010043396852780138
+                - 0.15454138948467455
+                - 0.5774150921043698
+                - 0.07945897365945656
+                - 0.11828076678203818
+              q:
+                edges:
+                - 0.56801480646045
+                - 0.6410179406415392
+                - 0.7234036781274125
+                - 0.8163779020046313
+                - 0.9213014794266751
+                - 1.0397101806767974
+                - 1.1733371582944623
+                - 1.3241383152931625
+                - 1.4943209337851664
+                high: 1.4943209337851664
+                low: 0.56801480646045
+                scale: log
+                type: histogram
+                weights:
+                - 0.12427201864681267
+                - 0.037272537652384655
+                - 0.1477290274773354
+                - 0.019527400183785716
+                - 0.6711990160396816
+                - 0.0
+                - 0.0
+                - 0.0
+            weight: 0.309439712681453
+          type: joint
+  dynamics:
+    compression:
+      # Inferred from MixParams for threshold_db, ratio, see zero-based rows 2,5-7,11-12,14,16-18,20,23-24,27,32,34,36-37,42,44-48,51,54-56,58,61,63,66,74-79,84,88-92,95,101,104,112,116-117,119-120,126,129-131,133,135,139,144-145,147-148,160,162,165,172-173,176-177,179,181-182,184,186,189-192,194-198,205-206,210-212,214,216-217,219,222,224-226,229,231-234,239,244,248,250,252-253,258-259,261-262,264,269-273,275,277-278,281-282,287-289,297 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/dev-00000-of-00001.parquet for provenance; Inferred from MixParams for threshold_db, ratio, see zero-based rows 0,4,7,9,18,22,25,27-28,30,34-35,37-38,40,42-43,45,48,50,53,57-58,62,64,72-76,78,80,83-84,87-88,94-95,97-100,102-103,111,114,116,119,121-122,124-125,127-128,134-135,139,142-146,152,156,158,162,166-169,175,178-179,181,183,189,191,193-197,199-200,206,209,213,218,222,224,227-232,235,240,243,245-247,251,254-255,257,260,268,271,273-275,278-279,283-285,287-288,291,294-295,297,301,305,311-312,314-315,317-318,320-321,328,331-335,338,340,344,347,351,353-355,357,359-361,363,366-368,371,375-377,380-381,385,389-393,396-398,403,408-411,415-418,420-421,423,425,427,431,436-437,440-441,444-446,449-450,452-454,457,460-461,463,467,470,472-473,485-486,488,490,492-493,497,499 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/test-00000-of-00001.parquet for provenance; Inferred from MixParams for threshold_db, ratio, see zero-based rows 1,4,8-13,16,18,20,22,26,30,32,34-35,37,39-40,42-43,47-48,50,52,55-56,59-61,65-66,69,72-73,75-77,83,87,92,94,98,102,104,106-107,112,117,122,128-129,131-133,136,138-139,142-144,146,148,151-152,154-155,157-158,162,166,168,173,175,178-180,185,187,190,193,195,197-199,201,205,208,210-211,214,216,219,226-228,231,233,238,242-244,246,251,253,256,261-263,265-266,268-270,273-276,278-279,281-282,285,288-289,292,294-295,297,300-301,303-307,311,314,316-317,319-322,325,327-328,331,335-336,339-342,344-347,349,351-352,354,356,359,362,364,368-370,372,377-382,384-385,387,389-390,400-401,403-404,406-410,412-413,421-422,425-427,431,434-436,438-440,442,444,451,454-456,458,461-463,466-467,469,472,476,484-485,489,491,494,498-499,501,504,507-508,512-515,517,521,525,527,529-530,532-533,537-538,543-544,546,551-553,555,561-562,566,568,570-572,574-575,579,585-588,592-593,595,597,605,611,613-614,619-621,623,628-629,638,643,646,648-650,653,655,657-658,661-664,667,669-671,673-676,683-684,686,694,698,703-705,708,711-712,714,716-722,726-727,729-730,734-736,738,741,743,752-753,756-758,761,768-770,773-775,778,781,783-784,786,790,793,798-799,801,807,809-811,813-814,816,818-821,823-824,826,830,832,834,836-840,843-844,846-848,851,854,858,866-868,872,876-877,881-882,885-887,889-890,892,896,902-903,905-907,909,912,915,917,920,924-927,931,934-935,939-941,945-949,952,954,957,959-960,964,966-968,970,972-975,977-979,983,985,987,989-991,994-998,1000,1004-1005,1007-1008,1010,1012,1015,1017,1021,1023,1027,1030,1032,1034,1036,1038-1039,1046,1052,1054,1058-1062,1071-1072,1074,1076,1078-1079,1087-1088,1094-1095,1098,1101,1104,1109,1114,1118,1120,1125,1128,1130,1132-1134,1138,1142-1144,1146,1150-1152,1164,1168,1171-1172,1174-1175,1179,1182,1184,1187,1190,1193,1200-1201,1204,1207,1210,1212,1215-1221,1232-1234,1236,1240-1241,1246-1248,1250,1253-1254,1259-1260,1262-1263,1265,1270-1272,1274-1275,1278,1280,1282,1284-1287,1289,1292-1293,1297,1300-1301,1304-1306,1310-1311,1313,1315,1319,1321-1322,1327,1330-1331,1336,1338-1340,1342,1346-1348,1351,1353-1358,1363-1364,1368-1369,1373-1374,1377,1379,1381,1383,1387,1390,1393-1395,1397,1400,1402,1407,1412,1418,1422,1426,1429,1431,1433,1436,1438,1442,1448-1449,1453,1456,1458,1460-1461,1463,1465,1468-1469,1475,1477-1479,1483-1484,1486-1489,1492,1496,1498-1499,1501,1505,1511,1513,1518-1519,1525-1526,1528-1530,1533,1536,1539 in the original file https://huggingface.co/datasets/mclemcrew/MixParams/resolve/df15a107cf86ed46793df859daf43d5f24b142fd/data/train-00000-of-00001.parquet for provenance; Inferred from SocialFX for threshold_db, ratio, see zero-based rows 21,27,35,58,83,95,124,127,129,132,158,173,175,186-188,195,210,213,215,222,244,251,261,287,294,304,308,311,313,320,341,344,356,371,391,400,414,418-419,425,438,449,460,467,472,480-482,487,497,508,528,549,562,579,590,595,607,611,621,630,648,653,655,676,686,725,727,747,766,788,790,798,806,808,816-817,822,827,830,860,865,875,886,893-894,899,907,912-913,928-929,953,964,968,970,972,977,987,992,996,1017,1030,1032-1033,1044-1045,1057,1074,1078,1101,1107,1124 in the original file https://huggingface.co/datasets/seungheondoh/socialfx-original/resolve/d7e266cac1526ae7db52ea16c744595a05b9df27/data/comp-00000-of-00001.parquet for provenance.
+      settings:
+        components:
+        - parameters:
+            ratio:
+              edges:
+              - 1.0
+              - 1.1519144114949977
+              - 1.3269068114098672
+              - 1.5284830787739014
+              - 1.760681686165901
+              - 2.0281546083498143
+              - 2.3362605220981445
+              - 2.69117216441168
+              - 3.1
+              high: 3.1
+              low: 1.0
+              scale: log
+              type: histogram
+              weights:
+              - 0.10134329040666344
+              - 0.09690320408641893
+              - 0.027753016071017676
+              - 0.09867130656076997
+              - 0.3617105300368782
+              - 0.09461050808539326
+              - 0.06458498420437263
+              - 0.1544231605484859
+            threshold_db:
+              edges:
+              - -38.14390794344755
+              - -36.375919450516605
+              - -34.607930957585666
+              - -32.83994246465472
+              - -31.071953971723776
+              - -29.303965478792833
+              - -27.535976985861886
+              - -25.767988492930943
+              - -24.0
+              high: -24.0
+              low: -38.14390794344755
+              scale: linear
+              type: histogram
+              weights:
+              - 0.15300085805033073
+              - 0.04885855654704337
+              - 0.09453258647373548
+              - 0.09961313347414094
+              - 0.11283243763698858
+              - 0.30136671029152867
+              - 0.1248728341489749
+              - 0.06492288337725734
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.28640012485248745
+        - parameters:
+            ratio:
+              edges:
+              - 3.5
+              - 3.928224627180808
+              - 4.4088424918828
+              - 4.948263901135777
+              - 5.5536834623518105
+              - 6.233176042393475
+              - 6.995804467223844
+              - 7.851740398597206
+              - 8.812399999999998
+              high: 8.8124
+              low: 3.5
+              scale: log
+              type: histogram
+              weights:
+              - 0.1524090305885732
+              - 0.0355171568685281
+              - 0.0076412389969916
+              - 0.2804157721840026
+              - 0.1095694637808924
+              - 0.10277976325200729
+              - 0.20209811054811247
+              - 0.10956946378089234
+            threshold_db:
+              edges:
+              - -39.423737033531374
+              - -38.545094904339955
+              - -37.66645277514853
+              - -36.78781064595711
+              - -35.90916851676569
+              - -35.03052638757426
+              - -34.15188425838284
+              - -33.273242129191416
+              - -32.3946
+              high: -32.3946
+              low: -39.423737033531374
+              scale: linear
+              type: histogram
+              weights:
+              - 0.22846552538062098
+              - 0.1326095942497978
+              - 0.10429170123918503
+              - 0.20899563810581287
+              - 0.16176683166758068
+              - 0.005475281541050593
+              - 0.027970690981347083
+              - 0.130424736834605
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.17509129159645342
+        - parameters:
+            ratio:
+              edges:
+              - 3.2528956064484404
+              - 3.718693960219862
+              - 4.251192304592289
+              - 4.859941744051502
+              - 5.555861053394417
+              - 6.351432521265589
+              - 7.260925837506961
+              - 8.300654040054408
+              - 9.489266112147574
+              high: 9.489266112147574
+              low: 3.25289560644844
+              scale: log
+              type: histogram
+              weights:
+              - 0.025446296202046893
+              - 0.11844903868264574
+              - 0.20957871629029187
+              - 0.3875296222393682
+              - 0.03594794798656496
+              - 0.01116814342316907
+              - 0.00534352652013603
+              - 0.20653670865577725
+            threshold_db:
+              edges:
+              - -31.476599326547163
+              - -30.017024410728766
+              - -28.557449494910372
+              - -27.09787457909198
+              - -25.638299663273582
+              - -24.178724747455185
+              - -22.71914983163679
+              - -21.259574915818398
+              - -19.8
+              high: -19.8
+              low: -31.476599326547163
+              scale: linear
+              type: histogram
+              weights:
+              - 0.06782120078015429
+              - 0.456477112458478
+              - 0.026785106376370046
+              - 0.15856820997996365
+              - 0.22398824641692724
+              - 0.032218631260301174
+              - 0.02647160425557043
+              - 0.007669888472235168
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.29817127552251393
+        - parameters:
+            ratio:
+              edges:
+              - 1.2
+              - 1.4676064724142672
+              - 1.7948906315602073
+              - 2.195160923461243
+              - 2.6846936493855003
+              - 3.2833948135730333
+              - 4.015609566576016
+              - 4.911112158829676
+              - 6.0063166592090305
+              high: 6.006316659209031
+              low: 1.2
+              scale: log
+              type: histogram
+              weights:
+              - 0.042266287978748915
+              - 0.08781540356845081
+              - 0.18391771796818823
+              - 0.037237106820005215
+              - 0.38625530559027654
+              - 0.15002929216484892
+              - 0.044505834033331845
+              - 0.06797305187614952
+            threshold_db:
+              edges:
+              - -24.341292886033713
+              - -22.548631275279497
+              - -20.755969664525285
+              - -18.963308053771073
+              - -17.170646443016857
+              - -15.377984832262642
+              - -13.585323221508428
+              - -11.792661610754214
+              - -10.0
+              high: -10.0
+              low: -24.341292886033713
+              scale: linear
+              type: histogram
+              weights:
+              - 0.19845056375237696
+              - 0.05767018083317866
+              - 0.2085776772165749
+              - 0.21387214884726072
+              - 0.07733190615587386
+              - 0.0636508713283988
+              - 0.12837845212818033
+              - 0.05206819973815575
+            attack_ms:
+              type: choice
+              values:
+              - value: 5.0
+                weight: 1.0
+              - value: 10.0
+                weight: 1.0
+            release_ms:
+              type: choice
+              values:
+              - value: 40.0
+                weight: 1.0
+              - value: 80.0
+                weight: 1.0
+          weight: 0.2403373080285458
+        type: joint
