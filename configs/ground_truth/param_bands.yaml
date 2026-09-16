@@ -33,15 +33,19 @@ shared_bands:
     - upper: 100.0
       suggested_terms: [subsonic, infrasonic, below the audible low end]
     - upper: 600.0
-      suggested_terms: [low end, bass, body]
+      # `boomy` is DAFx-17 T2's most EQ-specific descriptor: boom is EQ 7/7,
+      # g=0.86, and zero for every other effect.
+      suggested_terms: [low end, bass, body, boomy]
     - upper: 1200.0
       suggested_terms: [low mids, boxiness, lower midrange]
     - upper: 3400.0
       suggested_terms: [upper mids, presence, forward midrange]
     - upper: 4800.0
-      suggested_terms: [sibilance, harshness, bite]
+      # DAFx-17 T2 sharp: EQ 7, g=0.86.
+      suggested_terms: [sibilance, harshness, bite, sharp]
     - upper: 22000.0
-      suggested_terms: [top end, air, brightness]
+      # DAFx-17 T2 crisp: EQ 9/9. `air` and `bright` are from the same table.
+      suggested_terms: [top end, air, brightness, crisp]
 
 param_bands:
   separate_audio:
@@ -62,9 +66,11 @@ param_bands:
         - upper: 0.625
           suggested_terms: [medium-sized, moderate, room-sized]
         - upper: 0.85
-          suggested_terms: [large, spacious, hall-like]
+          # `distant` is SocialFX T1 reverb-tending.
+          suggested_terms: [large, spacious, hall-like, distant]
         - upper: 0.96
-          suggested_terms: [cavernous, vast, enormous]
+          # `grand` is SocialFX T1 reverb-tending, `cathedral-like` -specific.
+          suggested_terms: [cavernous, vast, enormous, grand, cathedral-like]
     damping:
       role: character
       direction: ascending
@@ -77,7 +83,8 @@ param_bands:
         - upper: 0.675
           suggested_terms: [balanced, natural]
         - upper: 0.81
-          suggested_terms: [dark, damped, muffled]
+          # `gloomy` is SocialFX T1 reverb-specific; `muffled` is its general tier.
+          suggested_terms: [dark, damped, muffled, gloomy]
     # Space motifs pin the reverb fully wet and let the enclosing send_return
     # block set the audible amount, so these carry no magnitude of their own.
     wet_level:
@@ -104,7 +111,11 @@ param_bands:
       sample_refs: [space.shared_send.delay.free.seconds]
       bands:
         - upper: 0.185
-          suggested_terms: [slapback, tight doubling, very short]
+          # No "doubling" here: MusicRadar puts doubling at 50ms and under and
+          # slapback at 100ms and over, and the shortest delay this pipeline can
+          # produce is 120ms -- the free-time support starts at 0.12s, and half
+          # a beat only reaches 0.12s at 250 BPM. Slapback is the whole band.
+          suggested_terms: [slapback, very short]
         - upper: 0.35
           suggested_terms: [short, quick echo]
         - upper: 0.6
@@ -512,21 +523,41 @@ block_bands:
       role: ignore
       note: Pinned to 1.0 by every send_return recipe.
 
-# Overlays widen the suggested vocabulary for a band when other operators are
-# present in the same chain, so descriptor wording can follow the character of
-# the chain as a whole. Tags are the operator tags from operators.yaml. Overlays
+# Vocabulary safe to use about any chain, whatever effects are in it. This is
+# SocialFX Table 1's *general* tier: words their raters used for all three of
+# EQ, reverberation and compression. It is therefore not evidence about delay,
+# modulation or pitch, which that study did not test -- those keep the
+# hand-written overlays below.
+chain_vocabulary: [warm, loud, soft, clear, muffled, bright, calm]
+
+# Overlays widen the suggested vocabulary for a band when particular effects are
+# present in the chain, so descriptor wording can follow the character of the
+# chain as a whole. Tags are the operator tags from operators.yaml. Overlays
 # only ever append suggestions, so the magnitude axis stays intact.
+#
+# Sources: SocialFX T1's *tending* tier supplies the reverb, compression and EQ
+# rows -- words that lean to one effect but appear in others, which is exactly
+# what a suggestion should be. MusicRadar's modulation guide supplies the split
+# between chorus and phaser.
 context_overlays:
+  # These were one `modulation` overlay, which conflated two different effects:
+  # MusicRadar is explicit that swirling and metallic are the phaser's
+  # character, while thickening, doubling and detuning are the chorus's. Both
+  # operators already carry their own tag alongside `modulation`.
+  - when_chain_has_tags: [chorus]
+    add_terms: [thickened, doubled, detuned, rich, dense]
+  - when_chain_has_tags: [phaser]
+    add_terms: [swirling, metallic, sweeping]
   - when_chain_has_tags: [distortion]
     add_terms: [gritty, crushed, ragged, dirty]
-  - when_chain_has_tags: [modulation]
-    add_terms: [swirling, shimmery, watery, drifting]
   - when_chain_has_tags: [reverb, delay]
-    add_terms: [washy, cavernous, distant, echoing]
+    add_terms: [distant, hollow, spacey, dreamy, echoing, washy, cavernous]
+  # `punchy` is deliberately gone: DAFx-17 T2 measures punch at EQ 7 g=0.86 as
+  # well as Comp 9 g=0.71, so it is not compression's word to lend.
   - when_chain_has_tags: [compression, limiter]
-    add_terms: [punchy, dense, controlled, in-your-face]
+    add_terms: [quiet, full, crisp, energetic, subtle, clean, dense]
   - when_chain_has_tags: [eq_pass]
-    add_terms: [thin, filtered, telephone-like, band-limited]
+    add_terms: [cold, soothing, harsh, mellow, thin, filtered, band-limited]
   - when_chain_has_tags: [harmony, pitch]
     add_terms: [stacked, choral, layered]
   - when_chain_has_tags: [poison, noise]
@@ -554,6 +585,22 @@ context_overlays:
 # return_level band term "level with the dry signal"; `boost` and `trim`, which
 # the shelf and peak filters equally earn through their own gain_db; `warmth`
 # and `colour` for distortion, which read just as naturally as a low-shelf move.
+#
+# Three of those exclusions are corroborated by the descriptor studies in refs/:
+# - warm belongs to EQ, not distortion (DAFx-17 T2: EQ 11/13 g=0.82 against
+#   Dist 2), and SocialFX T1 files it in the *general* tier, used for any effect.
+# - `punch` is shared rather than compressor-specific (DAFx-17 T2: EQ 7 g=0.86
+#   AND Comp 9 g=0.71), so it stays out of apply_compressor_effect.
+# - SocialFX T1 calls `volume` compression-specific, but only because
+#   compression was the sole loudness-changing effect they tested. Here it
+#   belongs to apply_gain and is left there.
+#
+# A word must also survive contact with ordinary English, not only with this
+# file. Matching starts on a word boundary, so a candidate can no longer hide
+# mid-word or across a gap -- `hall` no longer matches "shallow", nor `echo`
+# "the chorus", which is why both are accepted above. What remains a hazard is
+# being the opening of a longer unrelated word: that is what still rules out
+# `comp` ("complex") and `limit` ("band-limited").
 operator_names:
   apply_gain:
     - volume
@@ -563,6 +610,8 @@ operator_names:
     - turn it up
     - turn down
     - turn it down
+  # DAFx-17 Table 2 measures crunch at distortion 14/15, g=0.78 and fuzz at
+  # 11/11, g=0.64 -- the two most distortion-specific descriptors it reports.
   apply_distortion_effect:
     - grit
     - dirt
@@ -577,6 +626,39 @@ operator_names:
   # compression, compressor and compressors. The name-derived token
   # `compressor` catches only the last two, which is why "add gentle
   # compression" is rejected without this.
+  # Reverb-specific words from SocialFX Table 1, whose reverb row is the one
+  # genuinely usable list in that table, plus `room` -- the strongest reverb
+  # descriptor in DAFx-17 Table 2, at 13/13 entries with g=0.72. `room`, `hall`
+  # and `cavern` also echo this operator's own room_size band terms, so a writer
+  # who takes the suggested wording passes the check.
+  #
+  # `cavern` covers "cavernous" and `church` covers "church-like" by substring.
+  # `ambience` deliberately does not cover "ambient", which is a genre word in
+  # the dataset configs and would describe the music rather than the effect.
+  # `space` and `wash` stay out: both are load-bearing style vocabulary in the
+  # AL2 exemplars, and neither picks reverb out from delay.
+  #
+  # `hall` is safe only because matching starts on a word boundary: under the
+  # old substring rule it matched "shallow", the standard word for low chorus
+  # depth, and would have satisfied reverb on any chain carrying both.
+  apply_reverb_effect:
+    - room
+    - hall
+    - cathedral
+    - church
+    - cavern
+    - ambience
+    - verb
+  # MusicRadar's delay guide names the family: echo, slapback, repeats. The
+  # type names it also lists -- ping-pong, tape echo, dub, multi-tap -- are left
+  # out, because this operator is a single mono tap and models none of them.
+  # `repeat` is the stem form, so it covers repeats/repeated/repeating and
+  # echoes the feedback band terms. `echo` is only safe under the word-boundary
+  # matcher: with plain substring matching it matched "the chorus".
+  apply_delay_effect:
+    - echo
+    - slapback
+    - repeat
   apply_compressor_effect:
     - compress
   # `limit` and `limited` are deliberately absent: both are substrings of
