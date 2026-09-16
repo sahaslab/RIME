@@ -57,6 +57,40 @@ ALIAS_SUFFIXES = ("_effect", "_filter", "_tool")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
+def text_words(text: str) -> tuple[str, ...]:
+    """Lowercase alphanumeric words of a text, separators discarded."""
+    return tuple(word for word in NON_ALNUM_RE.split(text.lower()) if word)
+
+
+def mentions(words: Sequence[str], candidate: str) -> bool:
+    """Whether a text mentions a candidate word or phrase.
+
+    A candidate matches when the concatenation of one or more consecutive whole
+    words, starting on a word boundary, starts with it. Candidates are stored
+    with their own separators already removed, so the same rule serves single
+    words, phrases, and the tokens derived from operator names.
+
+    Starting on a word boundary is what stops a candidate matching inside an
+    unrelated word or across a gap between two: `hall` does not match "shallow",
+    and `echo` does not match "the chorus". Joining consecutive words is what
+    keeps a token whose own separators are gone matching multi-word prose:
+    `highpass` still matches "high-pass" and `mainshum` still matches
+    "mains hum". Allowing the run to be *longer* than the candidate is what
+    keeps a stem covering its inflections: `grit` still matches "gritty".
+    """
+    if not candidate:
+        return False
+    for start in range(len(words)):
+        joined = ""
+        for word in words[start:]:
+            joined += word
+            if joined.startswith(candidate):
+                return True
+            if len(joined) >= len(candidate):
+                break
+    return False
+
+
 @dataclass(frozen=True)
 class Band:
     upper: float
@@ -229,9 +263,11 @@ class BandLexicon:
         shared_bands: Mapping[str, tuple[Band, ...]],
         version: int = 1,
         operator_names: Mapping[str, tuple[str, ...]] | None = None,
-        stem_names: Mapping[str, tuple[str, ...]] | None = None
+        stem_names: Mapping[str, tuple[str, ...]] | None = None,
+        chain_vocabulary: Sequence[str] = ()
     ):
         self.version = version
+        self._chain_vocabulary = tuple(chain_vocabulary)
         self._operator_names = dict(operator_names or {})
         self._stem_names = dict(stem_names or {})
         self._param_bands = {
@@ -289,7 +325,9 @@ class BandLexicon:
             stem_names={
                 stem: cls._normalize_names(names)
                 for stem, names in (loaded.get("stem_names") or {}).items()
-            }
+            },
+            # Display terms, not match tokens, so they keep their own spelling.
+            chain_vocabulary=tuple(loaded.get("chain_vocabulary") or ())
         )
 
     @staticmethod
@@ -392,8 +430,15 @@ class BandLexicon:
         return self._block_bands.get(kind, {}).get(param)
 
     def overlay_terms(self, tags: Sequence[str]) -> tuple[str, ...]:
+        """Chain-level vocabulary for a set of tags.
+
+        The chain vocabulary comes first because it holds regardless of which
+        effects are present; the tag-keyed overlays then add what is specific to
+        this chain. Deduplication keeps a word that appears in both from being
+        offered twice.
+        """
         present = set(tags)
-        terms: list[str] = []
+        terms: list[str] = list(self._chain_vocabulary)
         for overlay in self._overlays:
             if present.intersection(overlay.get("when_chain_has_tags", [])):
                 terms.extend(overlay.get("add_terms", []))
@@ -939,7 +984,7 @@ class AbstractionLadder:
         operator_names: Mapping[str, tuple[str, ...]],
         exempt_tags: Sequence[str]
     ) -> list[str]:
-        normalized = NON_ALNUM_RE.sub("", text.lower())
+        words = text_words(text)
         exempt = set(exempt_tags)
         missing: list[str] = []
         for operator in operators:
@@ -951,7 +996,7 @@ class AbstractionLadder:
                 *self._operator_tokens(operator),
                 *operator_names.get(operator, ())
             )
-            if not any(token in normalized for token in accepted):
+            if not any(mentions(words, token) for token in accepted):
                 missing.append(operator)
         return missing
 
@@ -960,12 +1005,12 @@ class AbstractionLadder:
         text: str,
         stem_names: Mapping[str, tuple[str, ...]]
     ) -> list[str]:
-        normalized = NON_ALNUM_RE.sub("", text.lower())
+        words = text_words(text)
         return [
             stem
             for stem, accepted in stem_names.items()
             # No accepted words means the stem is exempt, not that it is missing.
-            if accepted and not any(token in normalized for token in accepted)
+            if accepted and not any(mentions(words, token) for token in accepted)
         ]
 
     @staticmethod
