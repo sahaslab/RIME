@@ -65,6 +65,16 @@ DRY_RUN_TEMPLATE = "[dry-run stage %d output: the real model reply would appear 
 # switch to another provider keeps working.
 API_KEY_RE = re.compile(r"""getenv\(\s*["']([A-Z0-9_]*API_KEY[A-Z0-9_]*)["']""")
 DRY_RUN_API_KEY_NAMES = ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+# Bedrock authenticates with AWS_* variables rather than anything matching
+# API_KEY_RE, so the scrape alone cannot satisfy a Bedrock-backed script. These
+# are stubbed unconditionally; a real value already in the environment wins.
+DRY_RUN_AWS_ENV_NAMES = (
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+)
 DRY_RUN_API_KEY_VALUE = "prompt-lab-dry-run"
 
 APP_STATE: dict[str, Any] = {
@@ -731,6 +741,36 @@ def load_prompt_module(recorder: CompletionRecorder | None) -> Any:
     return module
 
 
+def summarization_config() -> Any:
+    """The script's run settings, or None when they cannot be read.
+
+    Model and attempt counts moved out of module constants into
+    configs/ground_truth/summarization.yaml, so they are read from there. This
+    stays best-effort: the UI must still load a prompt script whose config is
+    missing or malformed, and report the error rather than refusing to start.
+    """
+    try:
+        from ground_truth.summarization import load_summarization_config
+
+        return load_summarization_config(config_dir_path())
+    except Exception:
+        return None
+
+
+def configured_model_name() -> str | None:
+    config = summarization_config()
+    return None if config is None else config.model.name
+
+
+def configured_max_attempts(module: Any) -> int:
+    """Attempts per level, preferring a module constant for older scripts."""
+    legacy = getattr(module, "MAX_ATTEMPTS", getattr(module, "MAX_ROUNDS", None))
+    if legacy:
+        return int(legacy)
+    config = summarization_config()
+    return 1 if config is None else max(int(config.max_attempts), 1)
+
+
 def prompt_script_info() -> dict[str, Any]:
     path = prompt_script_path()
     info: dict[str, Any] = {
@@ -748,7 +788,7 @@ def prompt_script_info() -> dict[str, Any]:
     except Exception as error:
         info["error"] = format_error(error)
         return info
-    info["model"] = getattr(module, "MODEL_NAME", None)
+    info["model"] = getattr(module, "MODEL_NAME", None) or configured_model_name()
     info["abstraction"] = abstraction_info(module)
     entrypoint = find_entrypoint(module)
     info["entrypoint"] = None if entrypoint is None else entrypoint.__name__
@@ -770,7 +810,7 @@ def abstraction_info(module: Any) -> dict[str, Any]:
         "available": False,
         "version": None,
         "levels": [],
-        "max_attempts": int(getattr(module, "MAX_ATTEMPTS", getattr(module, "MAX_ROUNDS", 3)) or 1),
+        "max_attempts": configured_max_attempts(module),
         "error": None,
     }
     resolver = ArgumentResolver(module=module, record=LenientRecord({}), body={})
@@ -811,7 +851,7 @@ def find_entrypoint(module: Any) -> Any:
 
 def patch_dry_run_api_keys() -> dict[str, str | None]:
     """Give the script placeholder credentials so dry runs need no real keys."""
-    names = set(DRY_RUN_API_KEY_NAMES)
+    names = set(DRY_RUN_API_KEY_NAMES) | set(DRY_RUN_AWS_ENV_NAMES)
     path = prompt_script_path()
     if path.exists():
         names.update(API_KEY_RE.findall(path.read_text(encoding="utf-8")))
@@ -981,8 +1021,7 @@ class ArgumentResolver:
         return self.reader().profile(self.record.get("graph_spec") or [])
 
     def max_attempts(self) -> int:
-        default = getattr(self.module, "MAX_ATTEMPTS", getattr(self.module, "MAX_ROUNDS", 3))
-        return int(self.body.get("max_attempts") or default or 1)
+        return int(self.body.get("max_attempts") or configured_max_attempts(self.module))
 
 
 def entrypoint_arguments(

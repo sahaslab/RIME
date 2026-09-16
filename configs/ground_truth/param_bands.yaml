@@ -572,6 +572,27 @@ operator_names:
     - saturation
     - overdrive
     - drive
+  # One entry covers the whole word family, since matching is substring-based:
+  # `compress` catches compress, compresses, compressed, compressing,
+  # compression, compressor and compressors. The name-derived token
+  # `compressor` catches only the last two, which is why "add gentle
+  # compression" is rejected without this.
+  apply_compressor_effect:
+    - compress
+  # `limit` and `limited` are deliberately absent: both are substrings of
+  # "band-limited", an eq_pass overlay term above, so either would let a
+  # filtered send satisfy the limiter check. `limiting` is not a substring of
+  # it, and `limiter` already matches from the operator's own name.
+  apply_limiter_effect:
+    - limiting
+    - ceiling
+    - brickwall
+  # `apply_noisegate` has no underscore-separated tail, so its name yields only
+  # "noisegate" and the bare word "gate" would otherwise be rejected. `gating`
+  # needs its own entry because it does not contain "gate".
+  apply_noisegate:
+    - gate
+    - gating
   # "hum" already matches from the operator's own name, so only the buzz
   # synonym is additive here.
   introduce_mains_hum:

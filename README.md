@@ -175,20 +175,37 @@ Important arguments:
 python scripts/generate_ground_truth_prompts.py
 ```
 
-Important arguments:
+Model and run settings come from
+[configs/ground_truth/summarization.yaml](configs/ground_truth/summarization.yaml),
+so a prompt file is reproducible from config alone. Generation goes through
+litellm to whichever provider that file names; the default is AWS Bedrock, which
+needs `boto3` installed plus either a Bedrock API key in
+`AWS_BEARER_TOKEN_BEDROCK` or credentials on the standard AWS chain (environment
+variables, a `.env` file, a named profile, or an instance role).
 
-- `--plans-path`
-  Default: `derived/ground_truth/subsampled_plans.jsonl`
-- `--output-path`
-  Default: `derived/ground_truth/subsampled_plan_prompts.jsonl`
+Every flag below is an override: pass one and it wins, leave it out and the
+value comes from `summarization.yaml`.
+
+- `--plans-path` / `--output-path`
+  Default: `summarization.paths.plans` / `summarization.paths.output`
 - `--config-dir`
-  Default: `configs/ground_truth`
+  Where the operators, distributions, abstraction and summarization configs
+  live. This one is a real default, not a config value, because it is what
+  locates `summarization.yaml`. Default: `configs/ground_truth`
+- `--model`
+  litellm model id. Default: `summarization.model.name`
 - `--levels`
   Abstraction levels to emit, e.g. `0,1`. Levels they derive from are generated
-  regardless. Default: every level in the ladder.
+  regardless. Default: `summarization.run.levels`, or every level in the ladder
+  when that is empty.
 - `--max-attempts`
   Generation attempts per level before keeping a text that still fails its hard
-  checks. Default: `3`
+  checks. Default: `summarization.run.max_attempts`
+- `--max-workers`
+  Concurrent graph workers. Default: `summarization.run.max_workers`
+- `--subsample-num` / `--seed`
+  Random sample size for smoke tests and the seed that makes it repeatable.
+  Default: `summarization.run.subsample_num` / `summarization.run.seed`
 
 The number of rewrites per graph is set by the ladder in
 [configs/ground_truth/abstraction_levels.yaml](configs/ground_truth/abstraction_levels.yaml),
@@ -211,6 +228,12 @@ and is validated at load time against the supports in `distributions.yaml`.
   Clip-level permissible task patterns
 - [configs/ground_truth/constraints.yaml](configs/ground_truth/constraints.yaml)
   Global chain-order and prior-shaping rules
+- [configs/ground_truth/abstraction_levels.yaml](configs/ground_truth/abstraction_levels.yaml)
+  Abstraction ladder: each level's voice, rules, exemplars and checks
+- [configs/ground_truth/param_bands.yaml](configs/ground_truth/param_bands.yaml)
+  Descriptor vocabulary for parameters, operators and stems
+- [configs/ground_truth/summarization.yaml](configs/ground_truth/summarization.yaml)
+  Model and run settings for prompt generation
 
 ## Delay Handling
 

@@ -1,0 +1,67 @@
+# Model and run settings for ground-truth prompt generation.
+#
+# Everything the summarization pass can be tuned by lives here, so a prompt file
+# is reproducible from config alone. Any CLI flag on
+# scripts/generate_ground_truth_prompts.py overrides the matching value below
+# when it is passed.
+#
+# Per-level `max_tokens` is deliberately NOT here: it bounds one level's output
+# and belongs beside the rules and exemplars that set that level's length, in
+# abstraction_levels.yaml.
+summarization:
+  model:
+    # litellm model id; the `bedrock/` prefix selects the Bedrock provider.
+    # This id is absent from litellm's cost map, so runs report no cost. The map
+    # gates cost tracking only, never which models can be called.
+    #
+    # The `-v1:0` suffix is load-bearing: litellm matches the id against its
+    # BEDROCK_CONVERSE_MODELS list, and the bare `qwen.qwen3-235b-a22b-2507`
+    # falls through to the older `invoke` route with a different request
+    # transform. Verify a new id with
+    # `litellm.BedrockModelInfo.get_bedrock_route("bedrock/<id>")` -- it must
+    # report `converse`.
+    #
+    # If Bedrock rejects the id outright, try the cross-region inference profile
+    # form `bedrock/us.qwen.qwen3-235b-a22b-2507-v1:0`; some models are only
+    # reachable that way. `aws bedrock list-foundation-models --by-provider qwen`
+    # is authoritative for the account.
+    name: bedrock/qwen.qwen3-235b-a22b-2507-v1:0
+    # Kept above zero on purpose: the generator's retry re-sends the same prompt
+    # after a failed hard check, so a deterministic model would return the same
+    # violation and burn the whole attempt budget.
+    temperature: 0.7
+    # Qwen3 235B is not enabled in every region, and Bedrock access is granted
+    # per model per region. Oregon carries it, as do Mumbai, Tokyo, London,
+    # Milan and Stockholm.
+    aws_region_name: us-west-2
+    # A named profile from ~/.aws/credentials. Null uses the default AWS
+    # credential chain: environment variables, then shared config, then an
+    # instance or task role.
+    #
+    # A Bedrock API key needs none of this: set AWS_BEARER_TOKEN_BEDROCK in the
+    # environment or in a .env file and litellm sends it as an Authorization
+    # bearer header, skipping SigV4. `aws_region_name` above is still required
+    # either way, because the request endpoint is built from it. No credential
+    # of any kind belongs in this file -- it is version-controlled.
+    aws_profile_name: null
+    # Transport-level retries litellm performs on throttling or a dropped
+    # connection. Distinct from `run.max_attempts`, which re-rolls text that
+    # came back failing a level's hard checks.
+    num_retries: 2
+    timeout_s: 120
+
+  paths:
+    plans: derived/ground_truth/subsampled_plans.jsonl
+    output: derived/ground_truth/subsampled_prompts.jsonl
+
+  run:
+    # Attempts per level before keeping text that still fails its hard checks.
+    max_attempts: 3
+    max_workers: 4
+    # Levels to emit; empty means every level in the ladder. Levels they derive
+    # from are generated regardless, since each one rewrites the level below it.
+    levels: []
+    # Random subsample size for smoke tests; -1 disables sampling.
+    subsample_num: -1
+    # Seed for that subsample, so a smoke run is repeatable.
+    seed: 0
