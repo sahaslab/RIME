@@ -1,7 +1,6 @@
 import re
 import copy
 import random
-import operator
 import itertools
 import yaml
 from pathlib import Path
@@ -9,6 +8,7 @@ from dataclasses import field, dataclass
 from collections.abc import Mapping, Sequence
 from ground_truth.runtime import RuntimePlanCompiler
 from ground_truth.operators import OperatorRegistry, load_operator_registry
+from ground_truth.predicates import as_list, lookup_path, path_exists, evaluate_condition
 from ground_truth.symbolic_graph import SymbolicEditGraph
 from typing import Any
 
@@ -41,27 +41,6 @@ SPECIAL_VALUE_HANDLER_NAMES = {
     "sample": "_expand_sample",
     "scale": "_expand_scale",
     "tempo_sync": "_expand_tempo_sync"
-}
-
-# Condition operators available in rule/filter specs.
-COMPARISON_OPERATORS = {
-    "eq": operator.eq,
-    "neq": operator.ne,
-    "gt": operator.gt,
-    "gte": operator.ge,
-    "lt": operator.lt,
-    "lte": operator.le
-}
-
-# Condition handlers for condition mapping keys.
-CONDITION_HANDLER_NAMES = {
-    "all": "_condition_all",
-    "any": "_condition_any",
-    "not": "_condition_not",
-    "exists": "_condition_exists",
-    "in": "_condition_in",
-    "contains_any": "_condition_contains_any",
-    "contains_all": "_condition_contains_all"
 }
 
 # Distribution kind handlers.
@@ -1639,54 +1618,13 @@ class GroundTruthPlanner:
         condition: Mapping[str, Any] | None,
         context: Mapping[str, Any]
     ) -> bool:
-        if condition is None:
-            return True
-        for key, compare in COMPARISON_OPERATORS.items():
-            if key in condition:
-                return self._condition_compare(condition[key], context, compare)
-        for key, handler_name in CONDITION_HANDLER_NAMES.items():
-            if key in condition:
-                return getattr(self, handler_name)(condition[key], context)
-        raise ValueError("Unsupported condition '%s'." % condition)
+        """Whether a `when:` condition holds against a planning context.
 
-    def _condition_all(self, conditions: Sequence[Mapping[str, Any]], context: Mapping[str, Any]) -> bool:
-        return all(self._evaluate_condition(item, context) for item in conditions)
-
-    def _condition_any(self, conditions: Sequence[Mapping[str, Any]], context: Mapping[str, Any]) -> bool:
-        return any(self._evaluate_condition(item, context) for item in conditions)
-
-    def _condition_not(self, condition: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-        return not self._evaluate_condition(condition, context)
-
-    def _condition_exists(self, spec: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-        return self._path_exists(context, spec["path"])
-
-    def _condition_in(self, spec: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-        if not self._path_exists(context, spec["path"]):
-            return False
-        return self._lookup_path(context, spec["path"]) in list(spec["values"])
-
-    def _condition_contains_any(self, spec: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-        if not self._path_exists(context, spec["path"]):
-            return False
-        values = self._as_list(self._lookup_path(context, spec["path"]))
-        return any(value in values for value in spec["values"])
-
-    def _condition_contains_all(self, spec: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
-        if not self._path_exists(context, spec["path"]):
-            return False
-        values = self._as_list(self._lookup_path(context, spec["path"]))
-        return all(value in values for value in spec["values"])
-
-    def _condition_compare(
-        self,
-        spec: Mapping[str, Any],
-        context: Mapping[str, Any],
-        compare: Any
-    ) -> bool:
-        if not self._path_exists(context, spec["path"]):
-            return False
-        return compare(self._lookup_path(context, spec["path"]), spec["value"])
+        The DSL itself lives in ground_truth/predicates.py, so the rejection
+        filter can evaluate the same condition language against its own context
+        without standing up a planner.
+        """
+        return evaluate_condition(condition, context)
 
     def _can_resolve(self, value: Any, context: Mapping[str, Any]) -> bool:
         if value is None:
@@ -1703,31 +1641,15 @@ class GroundTruthPlanner:
 
     @staticmethod
     def _lookup_path(context: Mapping[str, Any], path: str) -> Any:
-        current: Any = context
-        for segment in path.split("."):
-            if isinstance(current, Mapping):
-                current = current[segment]
-            else:
-                current = getattr(current, segment)
-        return current
+        return lookup_path(context, path)
 
     @staticmethod
     def _path_exists(context: Mapping[str, Any], path: str) -> bool:
-        current: Any = context
-        for segment in path.split("."):
-            if isinstance(current, Mapping):
-                if segment not in current:
-                    return False
-                current = current[segment]
-                continue
-            if not hasattr(current, segment):
-                return False
-            current = getattr(current, segment)
-        return True
+        return path_exists(context, path)
 
     @staticmethod
     def _as_list(value: Any) -> list[Any]:
-        return value if isinstance(value, list) else [value]
+        return as_list(value)
 
     def _interpolate_string(self, value: str, context: Mapping[str, Any]) -> Any:
         matches = list(PLACEHOLDER_RE.finditer(value))

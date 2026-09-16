@@ -49,6 +49,7 @@ MOISESDB_ZIP = SHARED_ROOT / "moisesdb.zip"
 # weakest number in the whole derivation.
 NUNES_ORDANINI = {"vocals": 0.965, "drums": 0.959, "bass": 0.882, "guitar": 0.600}
 NUNES_ORDANINI_GUITAR_RANGE = (0.388, 0.788)
+NUNES_ORDANINI_N = 2399
 
 # What the held-out check will accept as an upper bound for a corrected
 # marginal. Point-identified for three stems; for guitar only the range is
@@ -82,6 +83,11 @@ MOISESDB_MIN_GENRE_TRACKS = 10
 # true union below this, so 0.609 is if anything generous.
 EXTERNAL_TRUTH = {"guitar": 0.609}
 
+# Add-one smoothing for MoisesDB's 240-track joint. Kept separate from `--alpha`,
+# which is denominated in clip-equivalents against MusicCaps' 5,200 clips and
+# would swamp a corpus this size. See `_moisesdb_joint`.
+MOISESDB_SMOOTHING = 1.0
+
 PROFILE_NAMES = ("observed", "corrected", "produced")
 
 
@@ -95,18 +101,23 @@ def main() -> None:
     parser.add_argument("--em-iterations", type=int, default=1500, help="EM iterations for the deconvolution. Default: %(default)s")
     parser.add_argument("--genre-stability-threshold", type=float, default=GENRE_STABILITY_THRESHOLD, help="Max across-genre standard deviation for MoisesDB's presence rate to be trusted as a sensitivity denominator. Above it the rate reflects MoisesDB's genre mix rather than the stem, and an external anchor is used. Default: %(default)s")
     parser.add_argument("--guitar-truth", type=float, default=None, help="How often guitar is really present in full-band material. Default: %.3f, the Nunes & Ordanini union under independence of clean/distorted/acoustic. Their published bounds are [%.3f, %.3f]; the upper bound assumes the three guitar types never co-occur, so it is the least plausible end" % (EXTERNAL_TRUTH["guitar"], *NUNES_ORDANINI_GUITAR_RANGE))
+    parser.add_argument("--mode", choices=["reference", "musiccaps"], default="reference", help="Which corpora to derive from. `reference` uses only MoisesDB and Nunes & Ordanini, keeping the priors independent of MusicCaps so mock corpora do not resemble a MusicCaps evaluation set. `musiccaps` uses the MusicCaps joint corrected for caption under-reporting, which is far more diverse but leaks the evaluation distribution. Default: %(default)s")
     parser.add_argument("--output-path", type=Path, default=Path("configs/ground_truth/stem_priors.yaml"), help="Output YAML path. Default: %(default)s")
     args = parser.parse_args()
 
     dataset_config = load_dataset_config(args.dataset_config)
     stems = _resolve_stems(args.stems, dataset_config)
-
-    observed_counts = _musiccaps_joint(args.musiccaps_manifest, stems)
     moisesdb = _moisesdb_presence(args.moisesdb_zip)
 
     external = dict(EXTERNAL_TRUTH)
     if args.guitar_truth is not None:
         external["guitar"] = args.guitar_truth
+
+    if args.mode == "reference":
+        _run_reference_mode(args, stems, moisesdb, external)
+        return
+
+    observed_counts = _musiccaps_joint(args.musiccaps_manifest, stems)
     truth = _truth_denominators(moisesdb, stems, external, args.genre_stability_threshold)
     sensitivity = _estimate_sensitivity(observed_counts, truth, stems)
     observed = _normalize(observed_counts)
@@ -191,6 +202,7 @@ def _moisesdb_presence(zip_path: Path) -> dict[str, Any]:
     cardinality: Counter[int] = Counter()
     genres: Counter[str] = Counter()
     by_genre: dict[str, list[set[str]]] = {}
+    inventories: list[set[str]] = []
     artists: set[str] = set()
     total = 0
     with zipfile.ZipFile(zip_path) as archive:
@@ -205,6 +217,7 @@ def _moisesdb_presence(zip_path: Path) -> dict[str, Any]:
             genre = payload.get("genre", "unknown")
             genres[genre] += 1
             by_genre.setdefault(genre, []).append(stem_names)
+            inventories.append(stem_names)
             artists.add(payload.get("artist", ""))
             total += 1
     if not total:
@@ -216,6 +229,7 @@ def _moisesdb_presence(zip_path: Path) -> dict[str, Any]:
         "genre_spread": _genre_spread(by_genre, presence),
         "cardinality": dict(sorted(cardinality.items())),
         "genres": dict(genres.most_common()),
+        "inventories": inventories,
     }
 
 
@@ -251,6 +265,162 @@ def _genre_spread(
         variance = sum(len(usable[genre]) * (rates[genre] - mean) ** 2 for genre in usable) / total
         spread[stem] = math.sqrt(variance)
     return spread
+
+
+# --------------------------------------------------------------------------
+# Reference-only derivation (no MusicCaps)
+# --------------------------------------------------------------------------
+
+
+def _run_reference_mode(
+    args: argparse.Namespace,
+    stems: Sequence[str],
+    moisesdb: Mapping[str, Any],
+    external: Mapping[str, float],
+) -> None:
+    marginals = _reference_marginals(moisesdb, stems, external, args.genre_stability_threshold)
+    rates = {stem: entry["value"] for stem, entry in marginals.items()}
+
+    moisesdb_joint, moisesdb_populated = _moisesdb_joint(moisesdb, stems)
+    profiles = {
+        "reference": _maxent_joint(stems, rates),
+        "moisesdb_empirical": moisesdb_joint,
+        "uniform": _uniform_joint(stems),
+    }
+    text = _render_reference_yaml(
+        stems=stems,
+        marginals=marginals,
+        profiles=profiles,
+        moisesdb=moisesdb,
+        moisesdb_populated=moisesdb_populated,
+    )
+    args.output_path.parent.mkdir(parents=True, exist_ok=True)
+    args.output_path.write_text(text, encoding="utf-8")
+
+    print("Wrote %s (mode: reference -- MusicCaps not used)" % args.output_path)
+    print("  marginals:")
+    for stem in stems:
+        entry = marginals[stem]
+        detail = entry["source"]
+        if entry["source"] == "blend":
+            detail = "blend of moisesdb %.3f and n&o %.3f" % (entry["moisesdb_value"], entry["nunes_ordanini_value"])
+        elif entry["source"] == "nunes_ordanini":
+            detail = "n&o only; moisesdb %.3f rejected, genre sd %.3f" % (entry["moisesdb_value"], entry["spread"])
+        print("    %-8s %.3f   %s" % (stem, entry["value"], detail))
+    print("  profiles:")
+    for name, joint in profiles.items():
+        non_empty = {subset: weight for subset, weight in joint.items() if subset}
+        scale = sum(non_empty.values())
+        effective = 1.0 / sum((weight / scale) ** 2 for weight in non_empty.values())
+        populated = sum(1 for weight in non_empty.values() if weight / scale >= 0.005)
+        print("    %-20s effective combinations %5.2f   cells above 0.5%%: %2d of %d" % (name, effective, populated, len(non_empty)))
+
+
+def _reference_marginals(
+    moisesdb: Mapping[str, Any],
+    stems: Sequence[str],
+    external: Mapping[str, float],
+    threshold: float,
+) -> dict[str, dict[str, Any]]:
+    """Blend MoisesDB and Nunes & Ordanini marginals, by corpus size.
+
+    Where MoisesDB's rate is genre-unstable it is dropped entirely rather than
+    blended, since averaging in a number that only reflects MoisesDB's genre mix
+    would carry that bias through at reduced weight instead of removing it.
+    """
+    rates = moisesdb.get("rates", {})
+    spread = moisesdb.get("genre_spread", {})
+    moisesdb_n = float(moisesdb.get("total", 0))
+    blended: dict[str, dict[str, Any]] = {}
+    for stem in stems:
+        anchor = external.get(stem, NUNES_ORDANINI.get(stem))
+        stem_spread = spread.get(stem, 0.0)
+        if anchor is None:
+            blended[stem] = {"value": rates.get(stem, 0.0), "source": "moisesdb", "spread": stem_spread}
+            continue
+        if stem_spread > threshold:
+            blended[stem] = {
+                "value": anchor,
+                "source": "nunes_ordanini",
+                "spread": stem_spread,
+                "moisesdb_value": rates.get(stem, 0.0),
+            }
+            continue
+        value = (moisesdb_n * rates.get(stem, 0.0) + NUNES_ORDANINI_N * anchor) / (moisesdb_n + NUNES_ORDANINI_N)
+        blended[stem] = {
+            "value": value,
+            "source": "blend",
+            "spread": stem_spread,
+            "moisesdb_value": rates.get(stem, 0.0),
+            "nunes_ordanini_value": anchor,
+        }
+    return blended
+
+
+def _maxent_joint(stems: Sequence[str], marginals: Mapping[str, float]) -> dict[frozenset[str], float]:
+    """Maximum-entropy joint subject to the given marginals, i.e. independence.
+
+    Neither reference corpus publishes a joint -- Nunes & Ordanini report only
+    marginals and QCA configurations, and MoisesDB's own joint is 91% full-band
+    over five cells. Independence is the least-committal way to turn marginals
+    into a distribution: it adds no dependence structure that the sources do not
+    support, and unlike MoisesDB's empirical joint it populates every cell.
+
+    Real stems are positively correlated, so this understates both very sparse
+    and very dense combinations. There is no way to fix that without a source
+    that actually measures co-occurrence.
+    """
+    joint: dict[frozenset[str], float] = {}
+    for subset in _all_subsets(stems):
+        probability = 1.0
+        for stem in stems:
+            rate = marginals[stem]
+            probability *= rate if stem in subset else 1.0 - rate
+        joint[subset] = probability
+    return joint
+
+
+def _moisesdb_joint(
+    moisesdb: Mapping[str, Any],
+    stems: Sequence[str],
+) -> tuple[dict[frozenset[str], float], float]:
+    """MoisesDB's own combination frequencies, lightly smoothed.
+
+    Faithful to a corpus with zero measurement error, but that corpus was
+    curated for source separation, so it is nearly all full-band: five of
+    fifteen cells are populated before smoothing.
+
+    Smoothing is deliberately NOT the `--alpha` used for the MusicCaps
+    deconvolution. That alpha is denominated in clip-equivalents and tuned
+    against 5,200 clips; spending it on 240 would put more pseudo-count than
+    data into the table and quietly turn this profile into a near-uniform one
+    (effective combinations 1.2 unsmoothed, 4.6 at alpha=20). Add-one keeps the
+    pseudo-count at 7% of the corpus, which fills the empty cells without
+    rewriting the shape.
+    """
+    keep = set(stems)
+    counts: Counter[frozenset[str]] = Counter()
+    for inventory in moisesdb.get("inventories", []):
+        counts[frozenset(inventory & keep)] += 1
+    subsets = _all_subsets(stems)
+    smoothed = {subset: counts.get(subset, 0) + MOISESDB_SMOOTHING for subset in subsets}
+    total = sum(smoothed.values())
+    populated = sum(1 for subset in subsets if subset and counts.get(subset, 0))
+    return {subset: value / total for subset, value in smoothed.items()}, populated
+
+
+def _uniform_joint(stems: Sequence[str]) -> dict[frozenset[str], float]:
+    """Equal weight on every non-empty combination.
+
+    Carries no information from any corpus, which makes it the right choice when
+    mock clips must not resemble the evaluation set, and the most efficient one
+    for exercising every recipe path per clip generated.
+    """
+    subsets = [subset for subset in _all_subsets(stems) if subset]
+    weight = 1.0 / len(subsets)
+    joint = {subset: weight for subset in subsets}
+    joint[frozenset()] = 0.0
+    return joint
 
 
 # --------------------------------------------------------------------------
@@ -751,6 +921,122 @@ def _rounded_weights(weights: Sequence[float], places: int = 5) -> list[str]:
         largest = max(range(len(rounded)), key=lambda index: rounded[index])
         rounded[largest] += residual
     return ["%.*f" % (places, value / scale) for value in rounded]
+
+
+def _render_reference_yaml(
+    stems: Sequence[str],
+    marginals: Mapping[str, Mapping[str, Any]],
+    profiles: Mapping[str, Mapping[frozenset[str], float]],
+    moisesdb: Mapping[str, Any],
+    moisesdb_populated: int,
+) -> str:
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Priors over Demucs stem combinations, for sampling mock analysis manifests.")
+    add("#")
+    add("# GENERATED by scripts/derive_stem_priors.py --mode reference")
+    add("# -- edit that script, not this file.")
+    add("#")
+    add("# MUSICCAPS IS DELIBERATELY NOT USED HERE. Downstream evaluation runs on")
+    add("# MusicCaps, so deriving mock corpora from it would make the development")
+    add("# distribution resemble the evaluation distribution. Only two corpora feed")
+    add("# this file:")
+    add("#")
+    add("#   MoisesDB (n=%d)          true multitrack inventories, zero measurement" % moisesdb["total"])
+    add("#                            error, but curated for source separation and so")
+    add("#                            almost entirely full-band.")
+    add("#   Nunes & Ordanini 2014    2,399 Billboard Hot 100 songs, instrumentation")
+    add("#   (n=%d)                 coded over full songs by music-school graduates." % NUNES_ORDANINI_N)
+    add("#                            See configs/ground_truth/refs/ for the paper.")
+    add("#")
+    add("# THE COST, STATED PLAINLY. Neither corpus publishes a joint distribution over")
+    add("# stem combinations: Nunes & Ordanini report marginals and QCA configurations")
+    add("# but never frequencies, and MoisesDB's own joint is 91% full-band across five")
+    add("# of fifteen cells. So the `reference` profile is the maximum-entropy joint")
+    add("# given the marginals below, which assumes independence. Real stems are")
+    add("# positively correlated, so it understates both very sparse and very dense")
+    add("# combinations, and there is no way to correct that without a corpus that")
+    add("# actually measures co-occurrence.")
+    add("#")
+    add("# In practice this concentrates hard. Check `effective_combinations` per")
+    add("# profile before using one for coverage work: if a recipe path needs a")
+    add("# single-stem clip, `reference` will reach it only rarely and `uniform` is the")
+    add("# profile to use instead.")
+    add("#")
+    add("# Marginals blend the two corpora by corpus size, EXCEPT where MoisesDB's rate")
+    add("# is genre-unstable. Its per-genre spread is 0.01 for vocals and drums and")
+    add("# 0.03 for bass -- flat, so the pooled rate transfers. For guitar it is 0.21")
+    add("# and bimodal (1.00 in rock/pop/rap/singer-songwriter, 0.14 in electronic), so")
+    add("# its pooled rate restates MoisesDB's own genre mix. Guitar therefore takes")
+    add("# the Nunes & Ordanini value alone rather than a blend, which would only carry")
+    add("# that bias through at reduced weight.")
+    add("")
+    add("version: 1")
+    add("stem_priors:")
+    add("  mode: reference")
+    add("  sources:")
+    add("    moisesdb: {role: marginals_and_joint, n: %d}" % moisesdb["total"])
+    add("    nunes_ordanini_2014: {role: marginals, n: %d}" % NUNES_ORDANINI_N)
+    add("    musiccaps: {role: excluded, reason: downstream_evaluation_set}")
+    add("")
+    add("  enabled_stems: [%s]" % ", ".join(stems))
+    add("")
+    add("  marginals:")
+    for stem in stems:
+        entry = marginals[stem]
+        add("    %s:" % stem)
+        add("      value: %.4f" % entry["value"])
+        add("      source: %s" % entry["source"])
+        add("      genre_sd: %.3f" % entry["spread"])
+        if entry["source"] == "blend":
+            add("      # moisesdb %.3f, nunes_ordanini %.3f, weighted by corpus size" % (entry["moisesdb_value"], entry["nunes_ordanini_value"]))
+        elif entry["source"] == "nunes_ordanini":
+            add("      # moisesdb says %.3f, rejected: genre_sd above threshold." % entry["moisesdb_value"])
+    add("")
+    add("  default_profile: reference")
+    add("")
+    add("  profiles:")
+
+    descriptions = {
+        "reference": [
+            "Maximum-entropy joint given the marginals above. The best estimate of",
+            "produced-music stem combinations that owes nothing to MusicCaps.",
+        ],
+        "moisesdb_empirical": [
+            "MoisesDB's own combination frequencies, add-%g smoothed. Only %d of 15" % (MOISESDB_SMOOTHING, moisesdb_populated),
+            "cells are populated by actual tracks; the rest are smoothing. Zero",
+            "measurement error, but the corpus is curated for source separation and",
+            "so is nearly all full-band. Use it to see what real multitrack",
+            "inventories look like, not to generate a varied corpus.",
+        ],
+        "uniform": [
+            "Equal weight on all 15 combinations. Carries no information from any",
+            "corpus, which makes it both the safest choice against resembling the",
+            "evaluation set and the most efficient for exercising every recipe path.",
+            "Use this for coverage runs.",
+        ],
+    }
+
+    for name, joint in profiles.items():
+        non_empty = {subset: weight for subset, weight in joint.items() if subset}
+        scale = sum(non_empty.values())
+        effective = 1.0 / sum((weight / scale) ** 2 for weight in non_empty.values())
+        add("")
+        for line in descriptions[name]:
+            add("    # %s" % line)
+        add("    # effective combinations: %.2f of %d" % (effective, len(non_empty)))
+        add("    %s:" % name)
+        add("      combinations:")
+        add("        type: choice")
+        add("        values:")
+        ordered = sorted(non_empty, key=lambda subset: (-non_empty[subset], sorted(subset)))
+        for subset, weight in zip(ordered, _rounded_weights([non_empty[s] for s in ordered])):
+            add("          - value: [%s]" % ", ".join(sorted(subset)))
+            add("            weight: %s" % weight)
+
+    add("")
+    return "\n".join(lines)
 
 
 def _all_subsets(stems: Sequence[str]) -> list[frozenset[str]]:
