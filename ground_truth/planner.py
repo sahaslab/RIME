@@ -2,7 +2,6 @@ import re
 import copy
 import random
 import itertools
-import yaml
 from pathlib import Path
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Sequence
@@ -10,6 +9,7 @@ from ground_truth.runtime import RuntimePlanCompiler
 from ground_truth.operators import OperatorRegistry, load_operator_registry
 from ground_truth.predicates import as_list, lookup_path, path_exists, evaluate_condition
 from ground_truth.symbolic_graph import SymbolicEditGraph
+import yaml
 from typing import Any
 
 # Placeholder pattern for string interpolation in binding/spec strings.

@@ -185,6 +185,27 @@ class Support:
 
 
 @dataclass(frozen=True)
+class ChainParam:
+    """One parameter of one chain step, exactly as the graph carries it.
+
+    The unfiltered counterpart of `ParamDescriptor`: no band resolution, no
+    role filtering, non-numeric values kept. `is_block` records which lookup
+    the parameter answers to, `block_spec` or `param_spec`.
+    """
+
+    label: str
+    operator: str
+    param: str
+    value: Any
+    is_block: bool
+    # The enclosing graph block. A rule about band-limiting has to tell a pass
+    # filter on a reverb's wet return -- routine practice -- from one narrowing
+    # the signal itself, and the operator alone cannot.
+    block_kind: str
+    block_name: str
+
+
+@dataclass(frozen=True)
 class ParamDescriptor:
     """One parameter of one chain step, resolved to its descriptor band."""
 
@@ -658,6 +679,43 @@ class ChainReader:
     def __init__(self, lexicon: BandLexicon, registry: OperatorRegistry):
         self.lexicon = lexicon
         self.registry = registry
+
+    def iter_params(
+        self,
+        graph_spec: Sequence[Mapping[str, Any]]
+    ) -> Iterator[ChainParam]:
+        """Every parameter a graph carries, flattened, in graph order.
+
+        The public door onto the block walk, for consumers that need the graph
+        as written rather than as banded. `profile` is the wrong source for
+        those: it drops every `role: ignore` parameter, which is where
+        `apply_reverb_effect.width`, the reverb wet/dry levels and
+        `apply_chorus_effect.centre_delay_ms` live -- exactly the pinned values
+        a rule about them has to read.
+
+        Deliberately not used by `profile` itself, which counts an operator as
+        present before looking at its parameters and so must keep seeing the
+        `separate` and `mix` blocks that carry none.
+        """
+        for block in graph_spec:
+            kind = block.get("kind")
+            handler_name = BLOCK_READER_NAMES.get(kind)
+            if handler_name is None:
+                raise ValueError("Unsupported graph block kind '%s'." % kind)
+            # One block at a time, through the same per-kind readers
+            # `_read_blocks` dispatches to, so the enclosing block stays known.
+            block_name = str(block.get("name") or block.get("prefix") or kind)
+            for label, owner, is_block, params in getattr(self, handler_name)(block):
+                for param, value in sorted(params.items()):
+                    yield ChainParam(
+                        label=label,
+                        operator=owner,
+                        param=param,
+                        value=value,
+                        is_block=is_block,
+                        block_kind=str(kind),
+                        block_name=block_name
+                    )
 
     def profile(self, graph_spec: Sequence[Mapping[str, Any]]) -> ChainProfile:
         descriptors: list[ParamDescriptor] = []

@@ -12,6 +12,8 @@ The ground-truth stack is now split into four symbolic stages:
    Permissible plans -> policy-selected subset
 4. `scripts/plan_coverage.py`
    Permissible plans -> coverage and distribution report
+5. `scripts/filter_ground_truth_prompts.py`
+   Generated prompts -> per-row rejection verdicts
 
 The planner does not use `request.intent`. It emits every recipe that is allowed
 for a clip by the YAML rules, heuristics, and metadata constraints.
@@ -214,6 +216,77 @@ descriptor vocabulary level 1 speaks in lives in
 [configs/ground_truth/param_bands.yaml](configs/ground_truth/param_bands.yaml)
 and is validated at load time against the supports in `distributions.yaml`.
 
+## 7. Filter Generated Rows
+
+```bash
+python scripts/filter_ground_truth_prompts.py --reachability
+python scripts/filter_ground_truth_prompts.py --dry-run --limit 5
+python scripts/filter_ground_truth_prompts.py --limit 20
+python scripts/filter_ground_truth_prompts.py --resume
+```
+
+Reads the prompt artifact and raises four flags per row, writing verdicts to a
+new file. The input is never modified, because `generate_agent_input.py` and the
+prompt lab both read `prompt_variants` and `prompt_levels` out of it.
+
+| flag | output | question |
+| --- | --- | --- |
+| `al_rules` | binary | Does each level satisfy its own rules? |
+| `al_consistency` | binary | Is AL1 consistent with AL0, AL2 with AL1? |
+| `joint_params` | plausible / implausible / unclear | Are co-sampled parameters jointly coherent? |
+| `stylistic` | appropriate / inappropriate / unclear | Does the edit suit the captioned music? |
+
+Each row ends with a `disposition` of `accept`, `reject` or `review`. What an
+`unclear` verdict does is configurable per criterion, and a judge call that
+never returned parseable JSON is never silently accepted.
+
+Two mechanisms, deliberately separated. Every rule in
+[configs/ground_truth/rejection.yaml](configs/ground_truth/rejection.yaml)
+carries a `trigger` in the same condition DSL as `constraints.yaml`, evaluated
+exactly by [ground_truth/predicates.py](ground_truth/predicates.py). A row that
+triggers nothing takes its default verdict without any model call at all. The
+judge then adjudicates only the rules that fired, and is handed their
+statements, their sources and the actual parameter values, so it never has to do
+arithmetic. Rules therefore declare what they `suggests`, not a verdict: the
+judge can overturn a trigger when the surrounding chain defuses it.
+
+The judge runs a different model from the generator, at `temperature: 0.0`,
+because a model grading prose it wrote itself measures authorship as much as
+compliance. Note that any prompt file generated before the generator switched
+models was written *by* the current judge, so that separation only holds for
+rows regenerated since.
+
+`al_rules` re-runs the mechanical checks rather than trusting the stored
+`checks_passed`: generation keeps text that still fails after its attempt
+budget. Because those checks read the current `param_bands.yaml`, the stage
+refuses to run when a row's `abstraction_version` does not match the loaded
+ladder, so a config edit since generation cannot masquerade as a rejection.
+
+### Reachability
+
+```bash
+python scripts/filter_ground_truth_prompts.py --reachability
+```
+
+A rule whose trigger cannot fire under the current configs is dormant. Dormant
+rules are kept on purpose -- they cost nothing, they record the intent, and they
+arm themselves if a support widens -- and nothing declares its own dormancy, so
+it cannot go stale. Two gates, operator first, because `operators.yaml` is what
+may be *declared* while `motifs.yaml` and `recipes.yaml` are what can actually
+be *placed*: five declared operators are referenced by neither.
+
+| verdict | meaning |
+| --- | --- |
+| `live` | can fire |
+| `vacuous` | always fires; the leaf is pinned inside the trigger region |
+| `dormant_distribution` | support exists but never reaches the region; widening it re-arms the rule |
+| `dormant_no_param` | the control does not exist, so no distribution change can arm it |
+| `unreachable_operator` | no motif or recipe can place the operator |
+| `data_dependent` | the trigger reads the corpus, not the configs |
+
+Since the repo has no test suite, `--reachability` and `--dry-run` are the test
+surface: both are deterministic, call no model, and are meant to be diffed.
+
 ## Current Config Layout
 
 - [configs/ground_truth/datasets/mtg_jamendo.yaml](configs/ground_truth/datasets/mtg_jamendo.yaml)
@@ -234,6 +307,8 @@ and is validated at load time against the supports in `distributions.yaml`.
   Descriptor vocabulary for parameters, operators and stems
 - [configs/ground_truth/summarization.yaml](configs/ground_truth/summarization.yaml)
   Model and run settings for prompt generation
+- [configs/ground_truth/rejection.yaml](configs/ground_truth/rejection.yaml)
+  Rejection criteria: sourced rules, their triggers, and the judge's settings
 
 ## Delay Handling
 
