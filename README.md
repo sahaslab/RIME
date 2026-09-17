@@ -269,3 +269,55 @@ and lists source, rendered, and ad hoc audio for auditioning.
 The ad hoc FX lane applies any non-separation, non-pitch operator from
 `operators.yaml` to a selected local validation track with editable JSON params.
 Outputs are written to `derived/validation/mtg_jamendo_10/ad_hoc`.
+
+### Effect Lab UI
+
+```bash
+python3 scripts/effect_lab_ui.py --port 8789
+```
+
+Open `http://127.0.0.1:8789`. Upload a `.wav`, pick a recipe and then one effect
+step inside it, and every parameter that step samples becomes a control clamped
+to its prior's support in `distributions.yaml` — a slider for a continuous
+distribution, a dropdown for a discrete one (weights shown), each opening at the
+distribution's central value. Apply it and A/B the original against the result.
+
+This answers the question reading the YAML cannot: what a given sampled value
+actually sounds like. Effects are addressed recipe-first because
+`distributions.yaml` is organized by workflow family, so a parameter's prior is
+only discoverable through the step that samples it.
+
+Three things it deliberately does not do:
+
+- **One effect at a time.** Building whole chains is what `prompt_lab_ui.py`
+  already does symbolically.
+- **No separation.** 34 of 35 recipes open with a `separate` block, but demucs
+  costs minutes and a checkpoint download, so the upload is used as the stem.
+  The recipe's intended stem is shown; upload that stem yourself for fidelity.
+- **No torch.** `graph/edit_graph.py` imports it at module scope and
+  `planner.py`/`runtime.py` pull it in transitively, so this UI reimplements the
+  two things it needs from them — the send-bus mix and the `soundfile` round
+  trip. It runs with `fastapi uvicorn python-multipart soundfile numpy scipy
+  pedalboard pyyaml` alone.
+
+Steps on a `send_return` bus are mixed through an emulated bus by default. The
+motifs pin those steps to `wet_level: 1.0, dry_level: 0.0` because
+`add_send_return` supplies the dry path, so applying one raw gives a fully wet
+signal with no reference; the bus trims are exposed as controls and a toggle
+switches between emulated and raw. A `joint` prior (the compressor and shelf
+settings) gets a mixture-component picker, since it models correlated
+parameters and its sampled dict becomes the step's whole params map.
+
+Parameters needing per-clip metadata are left at the operator's own default and
+flagged — a tempo-synced delay falls back to the 120 BPM the recipe's `coalesce`
+declares. Operators that cannot run on a bare array are listed but disabled with
+the reason; `apply_harmony_effect` and `apply_autotune` need live `skey` models.
+Peaks above full scale are reported rather than normalised, matching the
+pipeline, which does not normalise either.
+
+Two checks, neither needing audio or a browser:
+
+```bash
+python3 ground_truth/param_space.py      # every recipe effect builds a usable control set
+python3 scripts/effect_lab_ui.py --selftest   # every available effect renders at its defaults
+```
