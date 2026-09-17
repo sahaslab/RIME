@@ -21,10 +21,10 @@ WORKER_POISON_ONLY: bool = False
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--analysis-path", type=Path, default=Path("derived/ground_truth/mtg_jamendo_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
-    parser.add_argument("--output-path", type=Path, default=Path("derived/postmaster/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
+    parser.add_argument("--analysis-path", type=Path, default=Path("derived/ground_truth/musiccaps_analysis_manifest.jsonl").expanduser(), help="Input analysis manifest. Default: %(default)s")
+    parser.add_argument("--output-path", type=Path, default=Path("derived/ground_truth/permissible_plans.jsonl"), help="Output JSONL path for symbolic permissible plans. Default: %(default)s")
     parser.add_argument("--config-dir", type=Path, default=Path("configs/ground_truth"), help="Ground-truth config directory. Default: %(default)s")
-    parser.add_argument("--max-variants-per-recipe", type=int, default=None, help="Optional hard cap per recipe per clip. Default: no cap")
+    parser.add_argument("--max-variants-per-recipe", type=int, default=32, help="Optional hard cap per recipe per clip. Default: %(default)s")
     parser.add_argument(
         "--variant-selection",
         choices=["diverse", "random"],
@@ -41,10 +41,21 @@ def main():
     parser.add_argument("--disable-random-plans", action="store_true", help="Disable constrained random plan generation")
     parser.add_argument("--poison-only", action="store_true", help="Keep only plans that include a poison graph.")
     parser.add_argument("--limit", type=int, default=None, help="Optional clip limit for smoke tests or partial generation. Default: no limit")
+    parser.add_argument("--min-stems", type=int, default=2, help="Optional minimum number of stems for a clip to be included. Default: %(default)s")
+    parser.add_argument("--must-contain-stems", type=str, nargs="*", default=["drums", "vocals", "bass", "guitar"], help="Optional list of stem names of which at least one must be present in a clip for it to be included. Default: %(default)s")
     parser.add_argument("--num-workers", type=int, default=None, help="Optional number of worker processes for parallel processing. Default: no limit")
     args = parser.parse_args()
 
     records = load_records(args.analysis_path)
+
+    n_records_before_filter = len(records)
+    records = [
+        record for record in records
+        if (len(record["analysis"]["instrument_tags"]) >= args.min_stems) and any(stem in [candidate["separation_target"] for candidate in record["analysis"]["target_candidates"]] for stem in args.must_contain_stems)
+    ]
+    n_records_after_filter = len(records)
+    print(f"Filtered {n_records_before_filter - n_records_after_filter} records out of {n_records_before_filter} based on min_stems and must_contain_stems criteria. {n_records_after_filter} records remain.")
+
     if args.limit is not None:
         records = records[:args.limit]
 
