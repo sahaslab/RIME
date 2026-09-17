@@ -74,9 +74,14 @@ DISTRIBUTION_HANDLER_NAMES = {
     "uniform": "_resolve_uniform_distribution",
     "int_uniform": "_resolve_int_uniform_distribution",
     "joint": "_resolve_joint_distribution",
-	"normal": "_resolve_fitted_distribution",
-	"histogram": "_resolve_fitted_distribution",
-	"log_uniform": "_resolve_fitted_distribution"
+    "parameters": "_resolve_parameters_distribution",
+    "mixture": "_resolve_mixture_distribution",
+    "gaussian_mixture": "_resolve_mixture_distribution",
+    "normal": "_resolve_fitted_distribution",
+    "beta": "_resolve_fitted_distribution",
+    "power_law": "_resolve_fitted_distribution",
+    "histogram": "_resolve_fitted_distribution",
+    "log_uniform": "_resolve_fitted_distribution"
 }
 
 # Rule action handlers.
@@ -1565,6 +1570,37 @@ class GroundTruthPlanner:
             return [rng.choices(values, weights=weights, k=1)[0]]
         return values
 
+    def _resolve_parameters_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[dict[str, Any]]:
+        columns = {
+            name: self._distribution_values(model["sample"], mode, rng)
+            if "sample" in model
+            else getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
+            for name, model in spec["parameters"].items()
+        }
+        return [{name: values[index % len(values)] for name, values in columns.items()} for index in range(max(len(values) for values in columns.values()))]
+
+    def _resolve_mixture_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[Any]:
+        components = spec["components"]
+        if spec["type"] == "gaussian_mixture":
+            components = [{"weight": component["weight"], "distribution": {"type": "normal", "low": spec["low"], "high": spec["high"], "scale": spec.get("scale", "linear"), "mean": component["mean"], "std": component["std"]}} for component in components]
+        if mode == "sample":
+            components = rng.choices(components, weights=[component["weight"] for component in components], k=1)
+        values = []
+        for component in components:
+            model = component["distribution"]
+            values.extend(getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng))
+        return values
+
     def _resolve_uniform_distribution(
         self,
         spec: Mapping[str, Any],
@@ -1587,7 +1623,9 @@ class GroundTruthPlanner:
         settings = []
         for component in components:
             columns = {
-                name: getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
+                name: self._distribution_values(model["sample"], mode, rng)
+                if "sample" in model
+                else getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
                 for name, model in component["parameters"].items()
             }
             # Enumeration uses representative marginal quantiles per component;
@@ -1603,7 +1641,7 @@ class GroundTruthPlanner:
         rng: random.Random
     ) -> list[float]:
         kind = spec["type"]
-        logarithmic = spec.get("scale") == "log" or kind == "log_uniform"
+        logarithmic = spec.get("scale") == "log" or kind in {"log_uniform", "power_law"}
         low, high = float(spec["low"]), float(spec["high"])
         assert low < high and (not logarithmic or low > 0)
         a, b = (math.log(low), math.log(high)) if logarithmic else (low, high)
@@ -1612,12 +1650,16 @@ class GroundTruthPlanner:
         for probability in probabilities:
             if kind == "log_uniform":
                 value = a + probability * (b - a)
+            elif kind == "beta":
+                from scipy.special import betaincinv
+                value = a + (b - a) * float(betaincinv(spec["alpha"], spec["beta"], probability))
+            elif kind == "power_law":
+                exponent = float(spec["exponent"]) + 1
+                value = a + probability * (b - a) if abs(exponent) < 1e-10 else a + math.log1p(probability * math.expm1(exponent * (b - a))) / exponent
             elif kind == "normal":
-                normal = NormalDist(float(spec["mean"]), float(spec["std"]))
-                lower, upper = normal.cdf(a), normal.cdf(b)
-                assert lower < upper
-                quantile = min(1.0 - 1e-15, max(1e-15, lower + probability * (upper - lower)))
-                value = normal.inv_cdf(quantile)
+                from scipy.stats import truncnorm
+                mean, std = float(spec["mean"]), float(spec["std"])
+                value = float(truncnorm.ppf(probability, (a - mean) / std, (b - mean) / std, loc=mean, scale=std))
             else:
                 assert kind == "histogram"
                 edges = [float(edge) for edge in spec["edges"]]
