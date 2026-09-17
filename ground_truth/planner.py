@@ -1,10 +1,12 @@
 import re
+import math
 import copy
 import random
 import operator
 import itertools
 import yaml
 from pathlib import Path
+from statistics import NormalDist
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Sequence
 from ground_truth.runtime import RuntimePlanCompiler
@@ -70,7 +72,11 @@ DISTRIBUTION_HANDLER_NAMES = {
     "grid": "_resolve_choice_distribution",
     "values": "_resolve_choice_distribution",
     "uniform": "_resolve_uniform_distribution",
-    "int_uniform": "_resolve_int_uniform_distribution"
+    "int_uniform": "_resolve_int_uniform_distribution",
+    "joint": "_resolve_joint_distribution",
+	"normal": "_resolve_fitted_distribution",
+	"histogram": "_resolve_fitted_distribution",
+	"log_uniform": "_resolve_fitted_distribution"
 }
 
 # Rule action handlers.
@@ -1568,6 +1574,68 @@ class GroundTruthPlanner:
         if mode == "sample":
             return [rng.uniform(float(spec["low"]), float(spec["high"]))]
         return self._enumerate_uniform(spec)
+
+    def _resolve_joint_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[dict[str, float]]:
+        components = spec["components"]
+        if mode == "sample":
+            components = rng.choices(components, weights=[item["weight"] for item in components], k=1)
+        settings = []
+        for component in components:
+            columns = {
+                name: getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
+                for name, model in component["parameters"].items()
+            }
+            # Enumeration uses representative marginal quantiles per component;
+            # sampling draws independently inside the selected component.
+            for index in range(max(len(values) for values in columns.values())):
+                settings.append({name: values[index % len(values)] for name, values in columns.items()})
+        return settings
+
+    def _resolve_fitted_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[float]:
+        kind = spec["type"]
+        logarithmic = spec.get("scale") == "log" or kind == "log_uniform"
+        low, high = float(spec["low"]), float(spec["high"])
+        assert low < high and (not logarithmic or low > 0)
+        a, b = (math.log(low), math.log(high)) if logarithmic else (low, high)
+        probabilities = [rng.random()] if mode == "sample" else [0.1, 0.5, 0.9]
+        values = []
+        for probability in probabilities:
+            if kind == "log_uniform":
+                value = a + probability * (b - a)
+            elif kind == "normal":
+                normal = NormalDist(float(spec["mean"]), float(spec["std"]))
+                lower, upper = normal.cdf(a), normal.cdf(b)
+                assert lower < upper
+                quantile = min(1.0 - 1e-15, max(1e-15, lower + probability * (upper - lower)))
+                value = normal.inv_cdf(quantile)
+            else:
+                assert kind == "histogram"
+                edges = [float(edge) for edge in spec["edges"]]
+                edges = [math.log(edge) for edge in edges] if logarithmic else edges
+                weights = [float(weight) for weight in spec["weights"]]
+                assert len(edges) == len(weights) + 1
+                assert all(left < right for left, right in zip(edges, edges[1:]))
+                assert all(weight >= 0 for weight in weights) and sum(weights) > 0
+                remaining = probability * sum(weights)
+                for index, weight in enumerate(weights):
+                    if weight > 0 and remaining <= weight:
+                        value = edges[index] + remaining / weight * (edges[index + 1] - edges[index])
+                        break
+                    remaining -= weight
+                else:
+                    value = edges[-1]
+            values.append(min(high, max(low, math.exp(value) if logarithmic else value)))
+        return values
 
     def _resolve_int_uniform_distribution(
         self,

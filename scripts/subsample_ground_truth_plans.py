@@ -31,19 +31,19 @@ def main() -> None:
     parser.add_argument(
         "--plans-path",
         type=Path,
-        default=Path("~/lab/postmaster/ground_truth/permissible_plans.jsonl").expanduser(),
+        default=Path("derived/ground_truth/permissible_plans.jsonl").expanduser(),
         help="Input JSONL of permissible plans. Default: %(default)s",
     )
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=Path("~/lab/postmaster/ground_truth/subsampled_plans.jsonl").expanduser(),
+        default=Path("derived/ground_truth/subsampled_plans.jsonl").expanduser(),
         help="Output JSONL for selected plans. Default: %(default)s",
     )
     parser.add_argument(
         "--policy",
         choices=["stratified_random", "stratified_feature_submodular", "feature_submodular", "random"],
-        default="stratified_feature_submodular",
+        default="stratified_random",
         help="Global selection policy. Default: %(default)s",
     )
     parser.add_argument(
