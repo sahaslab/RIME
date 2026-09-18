@@ -653,13 +653,13 @@ def main() -> None:
     parser.add_argument(
         "--plans-path",
         type=Path,
-        default=Path("derived/ground_truth/subsampled_plans.jsonl"),
+        default=Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/plans/musiccaps_subsampled_plans.jsonl"),
         help="Input JSONL of permissible plans. Default: %(default)s",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("derived/ground_truth/generated_audio").expanduser(),
+        default=Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/audio"),
         help="Root directory for rendered audio. Default: %(default)s",
     )
     parser.add_argument(

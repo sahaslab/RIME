@@ -29,7 +29,7 @@ def main():
     parser.add_argument(
         "--config-dir",
         type=Path,
-        default=Path("generation_priors/03_rime"),
+        default=Path("configs/ground_truth"),
     )
     parser.add_argument("--analysis-path", type=Path, default=None)
     parser.add_argument(
