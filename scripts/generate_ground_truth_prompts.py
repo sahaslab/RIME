@@ -2,13 +2,15 @@ import argparse
 import importlib.util
 import os
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Lock
 
 from dotenv import load_dotenv
 from litellm import completion
+from tqdm import tqdm
 from typing import Any
 
 from ground_truth.abstraction import (
@@ -54,6 +56,9 @@ WORKER_READER: ChainReader | None = None
 WORKER_LEVELS: tuple[AbstractionLevel, ...] = ()
 WORKER_MAX_ATTEMPTS = 3
 WORKER_MODEL: ModelSettings | None = None
+# Set by `main()` for the duration of the run; left None when there is no bar,
+# which is how every caller outside `main()` (the prompt lab UI) runs.
+WORKER_ON_PROMPT: Callable[[], None] | None = None
 
 # Model settings memoized per config directory, for callers that reach
 # `build_prompt_chain` without going through `main()` (the prompt lab UI does).
@@ -350,12 +355,18 @@ def build_prompt_chain(
     max_attempts: int,
     config_dir: Path | str = DEFAULT_CONFIG_DIR,
     model: ModelSettings | None = None,
+    on_prompt: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Generate one prompt per level for a single plan.
 
     `config_dir` and `model` both carry defaults so that a caller which drives
     this directly, rather than through `main()`, does not have to supply them:
     the model then resolves from `config_dir`'s summarization.yaml.
+
+    `on_prompt`, when given, is called once per finished level, so a caller can
+    report progress at prompt granularity rather than per plan. It defaults to
+    None because the levels of a chain are generated serially here, and the
+    only caller that needs a count is the worker pool in `main()`.
     """
     settings = model if model is not None else default_model_settings(config_dir)
     profile = reader.profile(record.get("graph_spec") or [])
@@ -391,6 +402,8 @@ def build_prompt_chain(
                 "violations": list(violations),
             }
         )
+        if on_prompt is not None:
+            on_prompt()
 
     return {
         "input_audio": str(record["audio_path"]),
@@ -409,6 +422,22 @@ def build_prompt_chain(
     }
 
 
+class ProgressCounter:
+    """Advance a tqdm bar from the worker threads.
+
+    Several workers finish levels at once and tqdm's increment is a
+    read-modify-write, so the lock is what keeps the displayed count honest.
+    """
+
+    def __init__(self, bar: tqdm) -> None:
+        self.bar = bar
+        self.lock = Lock()
+
+    def __call__(self) -> None:
+        with self.lock:
+            self.bar.update(1)
+
+
 def safe_build_prompt_chain(
     job: tuple[int, Mapping[str, Any]],
 ) -> tuple[int, dict[str, Any]]:
@@ -422,6 +451,7 @@ def safe_build_prompt_chain(
         reader=WORKER_READER,
         max_attempts=WORKER_MAX_ATTEMPTS,
         model=WORKER_MODEL,
+        on_prompt=WORKER_ON_PROMPT,
     )
     return index, result
 
@@ -459,6 +489,7 @@ def resolve_config(args: argparse.Namespace) -> SummarizationConfig:
 
 def main() -> None:
     global WORKER_LADDER, WORKER_READER, WORKER_LEVELS, WORKER_MAX_ATTEMPTS, WORKER_MODEL
+    global WORKER_ON_PROMPT
 
     args = parse_args()
     config = resolve_config(args)
@@ -489,11 +520,20 @@ def main() -> None:
 
     jobs = [(index, row) for index, row in enumerate(data)]
 
-    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-        ordered_results = sorted(
-            executor.map(safe_build_prompt_chain, jobs),
-            key=lambda item: item[0],
-        )
+    # One prompt per level per plan. Counting finished levels rather than
+    # finished plans keeps the bar moving while a long chain is still running,
+    # and is independent of the order `executor.map` happens to yield in.
+    with tqdm(
+        total=len(jobs) * len(levels),
+        desc="Generating prompts",
+        unit="prompt",
+    ) as bar:
+        WORKER_ON_PROMPT = ProgressCounter(bar)
+        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+            ordered_results = sorted(
+                executor.map(safe_build_prompt_chain, jobs),
+                key=lambda item: item[0],
+            )
 
     write_jsonl(config.output_path, (result for _, result in ordered_results))
 
