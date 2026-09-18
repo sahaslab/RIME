@@ -115,8 +115,25 @@ def main() -> None:
     if args.selftest:
         raise SystemExit(selftest())
 
+    warm_quantiles()
     print_access_hint(args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port)
+
+
+def warm_quantiles() -> None:
+    """Pay scipy's import cost at startup rather than on the first click.
+
+    param_space imports scipy lazily, inside the one function that needs it, so
+    that checking a distributions.yaml edit does not require the audio stack.
+    That leaves the first request touching a `beta` or `normal` prior wearing a
+    one-to-two second import, which in a UI reads as a stall on the first thing
+    the user does.
+    """
+    try:
+        param_space.fitted_quantile({"type": "beta", "alpha": 2.0, "beta": 2.0, "low": 1.0, "high": 10.0}, 0.5)
+        param_space.fitted_quantile({"type": "normal", "mean": 0.0, "std": 1.0, "low": -3.0, "high": 3.0}, 0.5)
+    except Exception as error:
+        print("  warning: could not warm the quantile helpers (%s)" % format_error(error), flush=True)
 
 
 def print_access_hint(host: str, port: int) -> None:
@@ -575,9 +592,9 @@ INDEX_HTML = """<!doctype html>
   .routing { font-size: 11px; opacity: 0.8; background: #8881; border-radius: 4px; padding: 7px 9px; margin: 0 0 8px; }
   .ctl { margin-bottom: 9px; }
   .ctl.pinned { opacity: 0.65; }
-  .sliderrow { display: flex; gap: 6px; align-items: center; }
-  .sliderrow input[type=range] { flex: 1 1 auto; padding: 0; }
-  .sliderrow input[type=number] { flex: 0 0 96px; }
+  .pickrow { display: flex; gap: 6px; align-items: center; }
+  .pickrow select { flex: 1 1 auto; }
+  .pickrow input[type=number] { flex: 0 0 104px; }
   .ro { padding: 3px 6px; border: 1px dashed #8886; border-radius: 4px; opacity: 0.8; }
   .layer { border: 1px solid #8884; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
   .layer > h2 { font-size: 12px; margin: 0; padding: 7px 10px; background: #8881; display: flex; justify-content: space-between; gap: 10px; }
@@ -662,6 +679,22 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"]/g, (ch) => ({ 
 // are fitted to, and the raw float tail just makes the column unreadable.
 function inputValue(value) {
   return typeof value === "number" && Number.isFinite(value) ? String(parseFloat(value.toPrecision(6))) : value;
+}
+
+// A value counts as on a decile only if it is that decile, to floating-point
+// tolerance -- the number box can hold anything, including a neighbouring value.
+function matchDecile(control, value) {
+  return (control.options || []).find(
+    (option) => Math.abs(option.value - value) <= Math.abs(value) * 1e-9 + 1e-12
+  ) || null;
+}
+
+// Labels and hints read better rounded: four significant digits is plenty for
+// choosing a decile, while the editable box keeps the fuller value.
+function fmtShort(value) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(parseFloat(value.toPrecision(4)))
+    : fmt(value);
 }
 
 function fmt(value) {
@@ -760,21 +793,38 @@ function controlHtml(control) {
   const head = `<label>${escapeHtml(control.label)}${units}</label>`;
   const pinned = control.bus_pinned ? " pinned" : "";
 
-  if (control.kind === "slider") {
+  if (control.kind === "quantile") {
+    // Deciles rather than a track: each option is an equally likely tenth of
+    // this prior, which says what the prior does and removes the question of
+    // whether a 20 Hz..20 kHz support should be travelled linearly or in log.
+    // The number box stays for deliberate overrides outside those ten points.
     const value = state.values[control.id] ?? control.default;
+    const mass = control.mass_low === null || control.mass_low === undefined
+      ? ""
+      : ` \u00b7 most draws ${fmtShort(control.mass_low)} \u2026 ${fmtShort(control.mass_high)}`;
+    const matched = matchDecile(control, value);
+    const options = control.options
+      .map((option) => `<option value="${option.value}"${option === matched ? " selected" : ""}>${escapeHtml(`${option.label}  \u00b7  ${fmtShort(option.value)}`)}</option>`)
+      .join("");
+    const custom = matched
+      ? '<option value="" class="custom">off-prior\u2026</option>'
+      : `<option value="" class="custom" selected>off-prior \u00b7 ${escapeHtml(fmtShort(value))}</option>`;
     return `<div class="ctl${pinned}">${head}
-      <div class="sliderrow">
-        <input type="range" class="slider" data-id="${escapeHtml(control.id)}" min="${control.min}" max="${control.max}" step="${control.step}" value="${inputValue(value)}" />
-        <input type="number" class="slider" data-id="${escapeHtml(control.id)}" min="${control.min}" max="${control.max}" step="${control.step}" value="${inputValue(value)}" />
+      <div class="pickrow">
+        <select class="quant" data-id="${escapeHtml(control.id)}">${options}${custom}</select>
+        <input type="number" class="num" data-id="${escapeHtml(control.id)}" min="${control.min}" max="${control.max}" step="any" value="${inputValue(value)}" />
       </div>
-      <div class="hint">prior spans ${fmt(control.min)} … ${fmt(control.max)}</div>${source}${note}</div>`;
+      <div class="hint">prior spans ${fmtShort(control.min)} \u2026 ${fmtShort(control.max)}${mass}</div>${source}${note}</div>`;
   }
   if (control.kind === "dropdown") {
     const index = state.values[control.id] ?? control.default_index;
     const options = control.options
       .map((option) => {
-        const weight = `   w ${fmt(option.weight)}`;
-        const text = control.id === COMPONENT_ID ? `component ${option.index + 1}${weight}` : `${fmt(option.value)}${weight}`;
+        const weight = `   w ${fmtShort(option.weight)}`;
+        // A settings group carries its own name in the prior ("cut", "boost"),
+        // which beats numbering the components for the reader.
+        const name = option.label || `group ${option.index + 1}`;
+        const text = control.id === COMPONENT_ID ? `${name}${weight}` : `${fmtShort(option.value)}${weight}`;
         return `<option value="${option.index}"${option.index === index ? " selected" : ""}>${escapeHtml(text)}</option>`;
       })
       .join("");
@@ -782,7 +832,7 @@ function controlHtml(control) {
   }
   if (control.kind === "number") {
     const value = state.values[control.id] ?? control.default;
-    return `<div class="ctl${pinned}">${head}<input type="number" class="slider" data-id="${escapeHtml(control.id)}" step="any" value="${inputValue(value)}" />${source}${note}</div>`;
+    return `<div class="ctl${pinned}">${head}<input type="number" class="num" data-id="${escapeHtml(control.id)}" step="any" value="${inputValue(value)}" />${source}${note}</div>`;
   }
   return `<div class="ctl${pinned}">${head}<div class="ro" data-ro="${escapeHtml(control.id)}">${escapeHtml(fmt(control.default))}</div>${source}${note}</div>`;
 }
@@ -818,15 +868,39 @@ function renderControls() {
 }
 
 function wire(root) {
-  root.querySelectorAll("input.slider").forEach((node) => {
-    node.oninput = (event) => {
-      const id = event.target.dataset.id;
-      state.values[id] = parseFloat(event.target.value);
-      root.querySelectorAll(`input.slider[data-id="${id}"]`).forEach((peer) => {
-        if (peer !== event.target) peer.value = event.target.value;
-      });
-      scheduleRefresh(false);
+  const byId = new Map();
+  [...(state.schema.bus_controls || []), ...(state.schema.controls || [])].forEach((control) => byId.set(control.id, control));
+
+  // The range and the number box hold the same value in different spaces on a
+  // log control, so they are synced through the real value rather than by
+  // copying one input's string into the other. The input being typed into is
+  // left alone, or a half-typed "-" would be rewritten under the cursor.
+  const commit = (id, value, source) => {
+    if (!Number.isFinite(value)) return;
+    state.values[id] = value;
+    root.querySelectorAll(`input.num[data-id="${id}"]`).forEach((node) => {
+      if (node !== source) node.value = inputValue(value);
+    });
+    // Keep the decile picker honest about a typed value: select the matching
+    // decile, or fall back to the off-prior entry relabelled with what was
+    // typed, so the picker never claims a decile the value is not on.
+    root.querySelectorAll(`select.quant[data-id="${id}"]`).forEach((node) => {
+      const matched = matchDecile(byId.get(id) || { options: [] }, value);
+      const custom = node.querySelector("option.custom");
+      if (custom) custom.textContent = matched ? "off-prior\u2026" : `off-prior \u00b7 ${fmtShort(value)}`;
+      node.value = matched ? String(matched.value) : "";
+    });
+    scheduleRefresh(false);
+  };
+
+  root.querySelectorAll("select.quant").forEach((node) => {
+    node.onchange = (event) => {
+      if (event.target.value === "") return;
+      commit(event.target.dataset.id, parseFloat(event.target.value), null);
     };
+  });
+  root.querySelectorAll("input.num").forEach((node) => {
+    node.oninput = (event) => commit(event.target.dataset.id, parseFloat(event.target.value), event.target);
   });
   root.querySelectorAll("select.pick").forEach((node) => {
     node.onchange = (event) => {

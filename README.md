@@ -278,9 +278,18 @@ python3 scripts/effect_lab_ui.py --port 8789
 
 Open `http://127.0.0.1:8789`. Upload a `.wav`, pick a recipe and then one effect
 step inside it, and every parameter that step samples becomes a control clamped
-to its prior's support in `distributions.yaml` — a slider for a continuous
-distribution, a dropdown for a discrete one (weights shown), each opening at the
-distribution's central value. Apply it and A/B the original against the result.
+to its prior in `distributions.yaml`. A continuous prior becomes a dropdown of
+its own deciles, so every option is an equally likely tenth of that prior, with
+a free numeric field alongside for deliberate overrides; a discrete prior keeps
+its own weighted values. Each opens at the median. Apply it and A/B the original
+against the result.
+
+Deciles rather than sliders because these priors are fitted over supports far
+wider than the mass they carry: the high-shelf `q` is fitted over 0.1–50 but 80%
+of its draws land between 0.4 and 1.4, which is under 2% of a linear track. The
+dropdown reports the shape a slider cannot, and each control also names its
+p10–p90 range and reads its fit in words ("log-normal, centred near 81",
+"2-mode prior, peaking near 0.63, 0.98").
 
 This answers the question reading the YAML cannot: what a given sampled value
 actually sounds like. Effects are addressed recipe-first because
@@ -321,3 +330,7 @@ Two checks, neither needing audio or a browser:
 python3 ground_truth/param_space.py      # every recipe effect builds a usable control set
 python3 scripts/effect_lab_ui.py --selftest   # every available effect renders at its defaults
 ```
+
+The first needs only `pyyaml` and `scipy` (scipy for the `beta` and truncated
+`normal` quantiles), so a `distributions.yaml` edit can be checked without the
+audio stack.
