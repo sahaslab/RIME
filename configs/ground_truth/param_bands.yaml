@@ -8,13 +8,16 @@
 # a band no sampled value can reach.
 #
 # Editing guideline:
-# - cut band edges against whatever landmarks the referenced distribution
-#   offers. The hand-written priors declared `samples`, and edges went on the
-#   midpoints between them so each landmark landed in a distinct band. The
-#   fitted priors carry no samples: a `histogram` offers its bin `edges`, which
-#   are better landmarks still because each carries a weight, so edges can be
-#   placed to give every band real probability mass. `normal` and `uniform`
-#   offer only `low` and `high`.
+# - cut band edges so that every band carries real probability mass under the
+#   referenced prior, because a band nothing lands in is vocabulary the writer
+#   is offered and can never justly use. The loader only checks that a band is
+#   *reachable*, not that it is *likely*, so this one is on the author.
+#   For a linear prior (`uniform`, `normal`) that means the arithmetic
+#   quantiles; for a log-scaled one (`log_uniform`, `power_law`, anything with
+#   `scale: log`) it means the geometric ones -- the balanced edge between 40
+#   and 80 is sqrt(40*80) = 56.6, not 60. Where a conventional landmark sits
+#   near a quantile, prefer the landmark: 3:1 and 6:1 read better than 2.94 and
+#   6.18 and cost only a few points of balance.
 # - `suggested_terms` are suggestions handed to the writer, never a required
 #   vocabulary; order them most literal first
 # - bands are half-open [previous upper, upper); the first band has no lower
@@ -154,7 +157,9 @@ param_bands:
       sample_refs: [tone.modulation.chorus.rate_hz]
       # The prior tops out at 0.9 Hz, so there is deliberately no "fast" band.
       bands:
-        - upper: 0.625
+        # sqrt(0.35 * 0.9). rate_hz is now a log_uniform over that range, so
+        # there is still no "fast" band to write: 0.9 Hz is the ceiling.
+        - upper: 0.56
           suggested_terms: [very slow, drifting, barely moving]
         - upper: 1.01
           suggested_terms: [slow, gently swaying]
@@ -222,21 +227,28 @@ param_bands:
       direction: ascending
       unit: ratio
       weight: 1.0
+      # `*.compression.settings` are `parameters` nodes: one draw supplies
+      # ratio, threshold, attack and release together, so the whole params block
+      # of the motif is a single `sample`. The old per-parameter vocal nodes are
+      # still in distributions.yaml but no recipe reads them any more.
       sample_refs:
-        - vocals.compression.ratio
+        - dynamics.compression.settings
+        - vocals.compression.settings
         - drums.parallel_compression.ratio
-      # Edges are histogram bin boundaries from the fitted prior, which now
-      # spans 1.4 to 8.8 rather than the old hand-written {4, 6, 8, 12}. The old
-      # top band started at 10 and was unreachable. Bin mass per band is
-      # 41 / 25 / 22 / 12 percent, so none of them is dead.
+      # The prior is now a beta over [1, 10] for vocals plus a log_uniform over
+      # [6, 10] for the drum bus, so the ratio a plan can ask for runs the whole
+      # 1:1 to 10:1 range. Edges sit on the conventional compression landmarks
+      # 3:1, 6:1 and 8:1, which land within 0.2 of the combined prior's
+      # quartiles and split the corpus 26 / 21 / 31 / 22 percent. Ten to one is
+      # the ceiling here, so it is what "slammed" means in this corpus.
       bands:
-        - upper: 2.217
+        - upper: 3.0
           suggested_terms: [gentle, light leveling]
-        - upper: 3.51
+        - upper: 6.0
           suggested_terms: [moderate control]
-        - upper: 5.558
+        - upper: 8.0
           suggested_terms: [firm, tight]
-        - upper: 8.81
+        - upper: 10.01
           suggested_terms: [heavy, squashed, slammed]
     threshold_db:
       role: magnitude
@@ -244,7 +256,8 @@ param_bands:
       unit: db
       weight: 0.5
       sample_refs:
-        - vocals.compression.threshold_db
+        - dynamics.compression.settings
+        - vocals.compression.settings
         - drums.parallel_compression.threshold_db
       hint: A lower threshold means more of the signal is being compressed.
       bands:
@@ -260,9 +273,10 @@ param_bands:
       role: character
       direction: ascending
       unit: ms
-      sample_refs: [vocals.compression.attack_ms]
+      sample_refs: [dynamics.compression.settings, vocals.compression.settings]
       bands:
-        - upper: 7.5
+        # sqrt(5 * 10): the geometric mean splits a log_uniform evenly.
+        - upper: 7.07
           suggested_terms: [fast attack, grabbing transients]
         - upper: 20.01
           suggested_terms: [moderate attack, letting transients through]
@@ -270,9 +284,11 @@ param_bands:
       role: character
       direction: ascending
       unit: ms
-      sample_refs: [vocals.compression.release_ms]
+      sample_refs: [dynamics.compression.settings, vocals.compression.settings]
       bands:
-        - upper: 65.0
+        # sqrt(40 * 80). The old 65 was an arithmetic midpoint and put 70% of
+        # the corpus in this band.
+        - upper: 56.6
           suggested_terms: [quick release, lively, pumping]
         - upper: 200.01
           suggested_terms: [slow release, smooth, unobtrusive]
@@ -319,6 +335,7 @@ param_bands:
       bands_ref: shared.frequency_regions
       hint: Everything below this region is removed.
       sample_refs:
+        - tone.equalization.highpass.cutoff_frequency_hz
         - space.shared_send.post_eq.highpass_hz
         - cleanup.hum.highpass_hz
         - cleanup.rumble.highpass_hz
@@ -332,6 +349,7 @@ param_bands:
       bands_ref: shared.frequency_regions
       hint: Everything above this region is removed.
       sample_refs:
+        - tone.equalization.lowpass.cutoff_frequency_hz
         - space.shared_send.post_eq.lowpass_hz
         - tone.retro.lowpass_hz
         - vocals.harmony.post_eq.lowpass_hz
@@ -343,43 +361,81 @@ param_bands:
       unit: hz
       bands_ref: shared.frequency_regions
       hint: The shelf tilts everything above this region.
-      sample_refs: [tone.retro.shelf_cut_hz]
+      sample_refs:
+        - tone.equalization.highshelf.settings
+        - tone.retro.shelf_cut_hz
+    # The fitted prior is a two-part mixture: a cut arm between -18 and -5 dB
+    # and a boost arm between +5 and +18. The old bands assumed the retro motif's
+    # narrow -8..-5 cut, so they stopped at 12 dB and read as rolloff only.
+    # Edges are the quartiles of |gain|, splitting the corpus 26/24/25/25.
     gain_db:
       role: magnitude
       direction: absolute
       unit: db
       weight: 0.75
-      sample_refs: [tone.retro.shelf_gain_db]
+      hint: Sign says lift or cut; the band describes how far.
+      sample_refs:
+        - tone.equalization.highshelf.settings
+        - tone.retro.shelf_gain_db
       bands:
-        - upper: 6.5
-          suggested_terms: [a gentle tilt, a slight rolloff]
-        - upper: 12.01
-          suggested_terms: [a strong tilt, a marked rolloff]
+        - upper: 6.2
+          suggested_terms: [a gentle tilt, a slight shelf]
+        - upper: 7.4
+          suggested_terms: [a moderate tilt]
+        - upper: 9.4
+          suggested_terms: [a strong tilt]
+        - upper: 18.01
+          suggested_terms: [a drastic tilt, the top end wholly rebalanced]
     q:
       role: ignore
       note: Pinned to the default 0.707 by the retro motif.
 
   apply_lowshelf_filter:
-    # No recipe samples the low shelf yet; bands mirror the high shelf so random
-    # plans still render, and are provisional until a motif grounds them.
+    # `target_lowshelf` now grounds this operator: one `parameters` draw supplies
+    # cutoff, gain and q together. These bands are no longer provisional.
     cutoff_frequency_hz:
       role: character
       direction: ascending
       unit: hz
       bands_ref: shared.frequency_regions
       hint: The shelf tilts everything below this region.
-      sample_refs: []
+      sample_refs: [tone.equalization.lowshelf.settings]
+    # The widest prior in the file: a beta over -60 to +24 dB, so a low shelf can
+    # do anything from a nudge to removing the bottom of the record. The beta is
+    # concentrated near -3 dB with a long tail, which is why the first three
+    # quartiles all sit under 10 dB and the last band covers the whole tail.
     gain_db:
       role: magnitude
       direction: absolute
       unit: db
       weight: 0.75
-      sample_refs: []
+      hint: Sign says lift or cut; the band describes how far.
+      sample_refs: [tone.equalization.lowshelf.settings]
       bands:
-        - upper: 6.5
-          suggested_terms: [a gentle tilt, a slight lift or trim]
-        - upper: 12.01
-          suggested_terms: [a strong tilt, a marked lift or trim]
+        - upper: 2.6
+          suggested_terms: [a slight tilt, a nudge]
+        - upper: 5.5
+          suggested_terms: [a moderate tilt]
+        - upper: 9.5
+          suggested_terms: [a strong tilt]
+        - upper: 60.01
+          suggested_terms: [a drastic tilt, the low end wholly rebuilt]
+    # Shelf q sets how sharply the shelf turns over rather than how narrow a
+    # bell is, so the wording is about slope. Edges are the terciles of the
+    # fitted log-scaled mixture; 0.707 -- the neutral Butterworth value -- sits
+    # inside the middle band, which is where most of the mass is.
+    q:
+      role: character
+      direction: ascending
+      unit: q
+      sample_refs: [tone.equalization.lowshelf.settings]
+      bands:
+        - upper: 0.83
+          suggested_terms: [a gentle slope, a broad transition]
+        - upper: 1.0
+          suggested_terms: [a standard slope]
+        - upper: 50.01
+          suggested_terms: [a steep slope, a resonant turnover]
 
   apply_peak_filter:
     cutoff_frequency_hz:
@@ -406,7 +462,8 @@ param_bands:
       unit: q
       sample_refs: [cleanup.vocal_sibilance.q]
       bands:
-        - upper: 3.25
+        # sqrt(2.5 * 4).
+        - upper: 3.16
           suggested_terms: [moderately narrow, focused]
         - upper: 12.01
           suggested_terms: [narrow, surgical, pinpoint]
@@ -450,7 +507,8 @@ param_bands:
       unit: hz
       sample_refs: [poison.noise.hum_modulation_hz]
       bands:
-        - upper: 0.275
+        # sqrt(0.2 * 0.35).
+        - upper: 0.265
           suggested_terms: [steady, unwavering]
         - upper: 1.01
           suggested_terms: [slowly wavering, drifting in level]
@@ -488,7 +546,8 @@ param_bands:
       unit: hz
       sample_refs: [poison.noise.rumble_modulation_hz]
       bands:
-        - upper: 0.275
+        # sqrt(0.2 * 0.35).
+        - upper: 0.265
           suggested_terms: [steady, unwavering]
         - upper: 1.01
           suggested_terms: [slowly wavering, breathing]

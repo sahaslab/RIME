@@ -34,10 +34,17 @@ SUPPORT_HANDLER_NAMES = {
     # whatever the mean, std or scale.
     "normal": "_clamped_support",
     "log_uniform": "_clamped_support",
+    "beta": "_clamped_support",
+    "power_law": "_clamped_support",
+    # A gaussian_mixture shares one [low, high] across its components, so the
+    # clamp bounds cover it without visiting them.
+    "gaussian_mixture": "_clamped_support",
     "histogram": "_histogram_support",
-    # A joint models several parameters together, so its support depends on
-    # which parameter is being asked about.
-    "joint": "_joint_support"
+    "mixture": "_mixture_support",
+    # These model several parameters at once, so their support depends on which
+    # parameter is being asked about.
+    "joint": "_joint_support",
+    "parameters": "_parameters_support"
 }
 
 # Graph block kinds and the method that pulls parameter bearers out of them.
@@ -623,20 +630,31 @@ class BandLexicon:
             node = node[part]
         if not isinstance(node, Mapping):
             raise ValueError("Distribution '%s' is not a distribution node." % ref)
-        return cls._node_support(node, param, ref)
+        return cls._node_support(node, param, ref, distributions)
 
     @classmethod
-    def _node_support(cls, node: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _node_support(
+        cls,
+        node: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         distribution_type = node.get("type", "choice")
         handler_name = SUPPORT_HANDLER_NAMES.get(distribution_type)
         if handler_name is None:
             raise ValueError(
                 "Unsupported distribution type '%s' for '%s'." % (distribution_type, ref)
             )
-        return getattr(cls, handler_name)(node, param, ref)
+        return getattr(cls, handler_name)(node, param, ref, distributions)
 
     @staticmethod
-    def _choice_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _choice_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         points: list[float] = []
         for item in spec.get("values", []):
             value = item["value"] if isinstance(item, Mapping) and "value" in item else item
@@ -645,7 +663,12 @@ class BandLexicon:
         return Support(points=tuple(points))
 
     @staticmethod
-    def _interval_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _interval_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         low = float(spec["low"])
         high = float(spec["high"])
         # `samples` is optional: the hand-written priors declared landmark values
@@ -659,7 +682,12 @@ class BandLexicon:
         return Support(points=points, intervals=((low, high),))
 
     @staticmethod
-    def _clamped_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _clamped_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         """Support of a fitted distribution: the clamp bounds, nothing more.
 
         `normal` and `log_uniform` draw from a shape that is unbounded or
@@ -670,7 +698,12 @@ class BandLexicon:
         return Support(intervals=((float(spec["low"]), float(spec["high"])),))
 
     @staticmethod
-    def _histogram_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _histogram_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         """Support of a histogram: one interval per bin that can be drawn from.
 
         Bins are reported individually rather than as a single [low, high] span
@@ -699,7 +732,13 @@ class BandLexicon:
         )
 
     @classmethod
-    def _joint_support(cls, spec: Mapping[str, Any], param: str, ref: str) -> Support:
+    def _joint_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         """Support of one parameter inside a joint distribution.
 
         A joint draws several correlated parameters at once, so the support for
@@ -714,7 +753,9 @@ class BandLexicon:
             available.update(parameters)
             model = parameters.get(param)
             if model is not None:
-                support = support.merge(cls._node_support(model, param, ref))
+                support = support.merge(
+                    cls._node_support(model, param, ref, distributions)
+                )
         if support.is_empty() and available:
             raise ValueError(
                 "Joint distribution '%s' models %s, not '%s'." % (
@@ -723,6 +764,56 @@ class BandLexicon:
                     param
                 )
             )
+        return support
+
+    @classmethod
+    def _parameters_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of one parameter inside a `parameters` block.
+
+        Like a joint, this draws several parameters at once, but flat: each name
+        maps either to an inline model or to `{sample: dotted.ref}` pointing at
+        another distribution, so a ref has to be followed.
+        """
+        models = spec.get("parameters") or {}
+        model = models.get(param)
+        if model is None:
+            raise ValueError(
+                "Distribution '%s' models %s, not '%s'." % (
+                    ref,
+                    ", ".join(sorted(models)) or "nothing",
+                    param
+                )
+            )
+        if "sample" in model:
+            return cls._distribution_support(model["sample"], distributions, param)
+        return cls._node_support(model, param, ref, distributions)
+
+    @classmethod
+    def _mixture_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of a mixture: the union over its components.
+
+        Component weights are not filtered on, because enumeration walks every
+        component regardless of weight.
+        """
+        support = Support()
+        for component in spec.get("components", []):
+            model = component.get("distribution")
+            if model is not None:
+                support = support.merge(
+                    cls._node_support(model, param, ref, distributions)
+                )
         return support
 
     @staticmethod
