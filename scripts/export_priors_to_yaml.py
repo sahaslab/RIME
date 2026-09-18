@@ -292,6 +292,8 @@ def continuous_defaults(distributions: dict[str, Any], prefix: str = "") -> None
     discrete = {"space.shared_send.delay.synced.beats", "vocals.harmony.intervals"}
     for name, spec in distributions.items():
         path = prefix + "." + name if prefix else name
+        if spec.get("type") in {"uniform", "int_uniform", "log_uniform"}:
+            spec.pop("samples", None)
         if "type" not in spec:
             continuous_defaults(spec, path)
         elif spec["type"] == "choice" and path not in discrete:

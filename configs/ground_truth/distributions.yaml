@@ -6,18 +6,10 @@ distributions:
         type: uniform
         low: 0.3
         high: 0.8
-        samples:
-        - 0.3
-        - 0.5
-        - 0.8
       return_level:
         type: uniform
         low: 0.6
         high: 1.15
-        samples:
-        - 0.6
-        - 0.85
-        - 1.15
       delay:
         synced:
           beats:
@@ -36,38 +28,19 @@ distributions:
             type: uniform
             low: 0.12
             high: 0.75
-            samples:
-            - 0.12
-            - 0.25
-            - 0.45
-            - 0.75
       feedback:
         type: uniform
         low: 0.0
         high: 0.45
-        samples:
-        - 0.0
-        - 0.18
-        - 0.35
-        - 0.45
       reverb:
         room_size:
           type: uniform
           low: 0.25
           high: 0.95
-          samples:
-          - 0.25
-          - 0.5
-          - 0.75
-          - 0.95
         damping:
           type: uniform
           low: 0.25
           high: 0.8
-          samples:
-          - 0.25
-          - 0.55
-          - 0.8
       post_eq:
         highpass_hz:
           type: log_uniform
@@ -190,11 +163,6 @@ distributions:
         type: uniform
         low: -6.0
         high: -1.0
-        samples:
-        - -6.0
-        - -4.0
-        - -2.5
-        - -1.0
       post_eq:
         highpass_hz:
           type: log_uniform
@@ -250,18 +218,10 @@ distributions:
           type: uniform
           low: 0.25
           high: 0.6
-          samples:
-          - 0.25
-          - 0.4
-          - 0.6
         depth:
           type: uniform
           low: 0.3
           high: 0.65
-          samples:
-          - 0.3
-          - 0.45
-          - 0.65
         rate_hz:
           type: log_uniform
           low: 0.35
