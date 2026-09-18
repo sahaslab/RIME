@@ -4,6 +4,7 @@ import heapq
 import argparse
 from pathlib import Path
 from collections import Counter, defaultdict
+from fractions import Fraction
 from typing import Any
 from tqdm import tqdm
 from plan_audit_utils import (
@@ -40,6 +41,7 @@ def main():
     parser.add_argument("--limit", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-per-source-recipe", type=int, default=3)
+    parser.add_argument("--max-random-fraction", type=float, default=0.15)
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--input-limit", type=int, default=None)
     args = parser.parse_args()
@@ -86,6 +88,8 @@ def main():
         if args.analysis_path
         else None,
         "max_per_source_recipe": args.max_per_source_recipe,
+        "max_random_fraction": args.max_random_fraction,
+        "random_selected": sum(candidates[index]["recipe_id"] == "random_constrained" for index in selected),
         "unmodeled_parameter_occurrences": dict(unmodeled),
         "coverage": [
             {
@@ -177,24 +181,49 @@ def select_candidates(
     features: list[set[tuple[str, str]]],
     args: argparse.Namespace,
 ) -> tuple[list[int], dict[int, float]]:
+    assert 0.0 <= args.max_random_fraction <= 1.0
+    fraction = Fraction(str(args.max_random_fraction))
+    available = Counter()
+    groups = Counter(
+        (candidate["clip_id"], candidate["recipe_id"])
+        for candidate in candidates
+    )
+    for (_, recipe), count in groups.items():
+        available[recipe == "random_constrained"] += (
+            min(count, args.max_per_source_recipe)
+            if args.max_per_source_recipe
+            else count
+        )
+    target = min(args.limit, sum(available.values()))
+    if fraction < 1:
+        target = min(target, int(available[False] / (1 - fraction)))
+    random_limit = int(target * fraction)
+    selected_random = 0
     order = list(range(len(candidates)))
     random.Random(args.seed).shuffle(order)
     counts = Counter()
     source_counts = Counter()
     selected = []
     scores = {}
+    def eligible(index: int) -> bool:
+        candidate = candidates[index]
+        key = (candidate["clip_id"], candidate["recipe_id"])
+        return (
+            index not in scores
+            and (not args.max_per_source_recipe or source_counts[key] < args.max_per_source_recipe)
+            and (candidate["recipe_id"] != "random_constrained" or selected_random < random_limit)
+        )
+
     if args.policy == "random":
         for index in tqdm(order, desc="Selecting random plans"):
-            if len(selected) >= args.limit:
+            if len(selected) >= target:
                 break
             candidate = candidates[index]
             key = (candidate["clip_id"], candidate["recipe_id"])
-            if (
-                args.max_per_source_recipe
-                and source_counts[key] >= args.max_per_source_recipe
-            ):
+            if not eligible(index):
                 continue
             selected.append(index)
+            selected_random += candidate["recipe_id"] == "random_constrained"
             scores[index] = 0.0
             source_counts[key] += 1
         return selected, scores
@@ -216,25 +245,18 @@ def select_candidates(
         sorted(groups, key=lambda key: (len(groups[key]), key)),
         desc="Covering recipes and targets",
     ):
-        if len(selected) >= args.limit:
+        if len(selected) >= target:
             break
         if counts[feature]:
             continue
-        eligible = [
-            index
-            for index in groups[feature]
-            if not args.max_per_source_recipe
-            or source_counts[
-                (candidates[index]["clip_id"], candidates[index]["recipe_id"])
-            ]
-            < args.max_per_source_recipe
-        ]
-        if not eligible:
+        eligible_indices = [index for index in groups[feature] if eligible(index)]
+        if not eligible_indices:
             continue
         index = max(
-            eligible, key=lambda item: marginal_gain(features[item], counts, weights)
+            eligible_indices, key=lambda item: marginal_gain(features[item], counts, weights)
         )
         selected.append(index)
+        selected_random += candidates[index]["recipe_id"] == "random_constrained"
         scores[index] = marginal_gain(features[index], counts, weights)
         counts.update(features[index])
         source_counts[
@@ -248,18 +270,15 @@ def select_candidates(
     heapq.heapify(heap)
     # Diminishing gains make cached scores upper bounds, enabling lazy greedy selection.
     with tqdm(
-        total=min(args.limit, len(candidates)),
+        total=target,
         initial=len(selected),
         desc="Selecting coverage plans",
     ) as progress:
-        while heap and len(selected) < args.limit:
+        while heap and len(selected) < target:
             _, tie, index = heapq.heappop(heap)
             candidate = candidates[index]
             key = (candidate["clip_id"], candidate["recipe_id"])
-            if (
-                args.max_per_source_recipe
-                and source_counts[key] >= args.max_per_source_recipe
-            ):
+            if not eligible(index):
                 continue
             score = marginal_gain(features[index], counts, weights)
             entry = (-score, tie, index)
@@ -267,6 +286,7 @@ def select_candidates(
                 heapq.heappush(heap, entry)
                 continue
             selected.append(index)
+            selected_random += candidate["recipe_id"] == "random_constrained"
             scores[index] = score
             counts.update(features[index])
             source_counts[key] += 1

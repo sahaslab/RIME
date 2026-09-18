@@ -202,7 +202,7 @@ def test_selector_fills_budget_without_discarding_bins() -> None:
         for index in range(8)
     ]
     args = argparse.Namespace(
-        seed=7, limit=4, max_per_source_recipe=1, policy="prior_coverage"
+        seed=7, limit=4, max_per_source_recipe=1, policy="prior_coverage", max_random_fraction=0.15
     )
     selected, _ = select_candidates(candidates, features, args)
     assert len(selected) == 4
@@ -214,3 +214,28 @@ def test_selector_fills_budget_without_discarding_bins() -> None:
         if dimension == "prior"
     } == {"0", "1", "2", "3"}
     assert select_candidates(candidates, features, args)[0] == selected
+
+
+def test_random_fraction_cap_and_shortfall() -> None:
+    for policy in ["random", "prior_coverage"]:
+        for fraction in [0.0, 0.15, 0.25, 1.0]:
+            for authored in [0, 5, 30]:
+                candidates = [
+                    {"clip_id": str(index), "recipe_id": "authored" if index < authored else "random_constrained"}
+                    for index in range(authored + 50)
+                ]
+                features = [{("recipe", row["recipe_id"])} for row in candidates]
+                args = argparse.Namespace(
+                    seed=7,
+                    limit=20,
+                    max_per_source_recipe=1,
+                    policy=policy,
+                    max_random_fraction=fraction,
+                )
+                selected, _ = select_candidates(candidates, features, args)
+                random_count = sum(candidates[index]["recipe_id"] == "random_constrained" for index in selected)
+                assert random_count <= len(selected) * fraction
+                if authored >= 20 or fraction == 1.0:
+                    assert len(selected) == 20
+                if authored == 0 and fraction < 1.0:
+                    assert not selected

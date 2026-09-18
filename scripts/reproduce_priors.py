@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--limit", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--max-random-fraction", type=float, default=0.15)
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--start-at", choices=["corpus", "fit", "export", "verify", "generate", "sample", "audit"], default="corpus")
@@ -30,7 +31,7 @@ def main():
         ("export", "export_priors_to_yaml.py", []),
         ("verify", "verify_sampling.py", ["--analysis-path", str(args.analysis_path), "--output-path", str(args.output_dir / "sampling_checks.json")]),
         ("generate", "generate_ground_truth_plans.py", ["--analysis-path", str(args.analysis_path), "--config-dir", str(config), "--output-path", str(plans), "--sampling-mode", "sample", "--seed", str(args.seed), "--num-workers", str(args.workers)]),
-        ("sample", "subsample_ground_truth_plans.py", ["--plans-path", str(plans), "--output-path", str(selected), "--config-dir", str(config), "--analysis-path", str(args.analysis_path), "--limit", str(args.limit), "--seed", str(args.seed), "--bins", str(args.bins)]),
+        ("sample", "subsample_ground_truth_plans.py", ["--plans-path", str(plans), "--output-path", str(selected), "--config-dir", str(config), "--analysis-path", str(args.analysis_path), "--limit", str(args.limit), "--max-random-fraction", str(args.max_random_fraction), "--seed", str(args.seed), "--bins", str(args.bins)]),
         ("audit", "audit_plans.py", ["--plans", str(plans), "--config-dir", str(config), "--analysis-path", str(args.analysis_path), "--output-dir", str(args.output_dir / "audit_permissible"), "--bins", str(args.bins)]),
         ("audit", "audit_plans.py", ["--plans", str(selected), "--config-dir", str(config), "--analysis-path", str(args.analysis_path), "--output-dir", str(args.output_dir / "audit_subsampled"), "--bins", str(args.bins)]),
         ("audit", "plot_fits.py", ["--output-dir", str(args.output_dir / "fits")]),
