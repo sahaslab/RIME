@@ -112,17 +112,19 @@ def marginal_models(
 
 def graph_parameters(
     nodes: list[dict[str, Any]],
+    provenance: bool = False,
 ) -> list[tuple[tuple[str, str, str, str], Any]]:
     result = []
+    params_key = "parameter_specs" if provenance else "params"
     for node in nodes:
         node_id = node.get("prefix", node.get("name", ""))
-        for parameter, spec in node.get("params", {}).items():
+        for parameter, spec in node.get(params_key, {}).items():
             result.append(((node_id, "", node.get("operator", ""), parameter), spec))
         for parameter in ("send_level", "return_level", "dry_level"):
-            if parameter in node:
+            if parameter in node and not provenance:
                 result.append(((node_id, "", "", parameter), node[parameter]))
         for step in node.get("steps", []):
-            for parameter, spec in step.get("params", {}).items():
+            for parameter, spec in step.get(params_key, {}).items():
                 result.append(
                     ((node_id, step["name"], step["operator"], parameter), spec)
                 )
@@ -166,6 +168,9 @@ def resolve_parameter(
     plan: dict[str, Any],
     analysis: dict[str, Any] | None,
 ) -> tuple[str, dict[str, Any] | None, Any, str]:
+    if isinstance(spec, dict) and "definition" in spec:
+        name = spec["name"]
+        spec = spec["definition"]
     if not isinstance(spec, dict):
         return name, {"type": "choice", "values": [spec]}, value, "fixed"
     if "sample" in spec:
@@ -220,10 +225,10 @@ def resolve_parameter(
             scale["value"], original, name, bindings, priors, plan, analysis
         )
     if "tempo_sync" in spec:
-        if analysis is None:
-            return name, None, value, "Missing analysis for tempo_sync"
         tempo = spec["tempo_sync"]
         bpm_spec = tempo["bpm"]
+        if analysis is None and isinstance(bpm_spec, dict):
+            return name, None, value, "Missing analysis for tempo_sync"
         branches = (
             bpm_spec.get("coalesce", [bpm_spec])
             if isinstance(bpm_spec, dict)
@@ -252,14 +257,18 @@ def extract_parameters(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows, missing = [], []
     recipe = plan["recipe_id"]
-    if (recipe, "graph_spec", None) not in routes:
+    provenance = {
+        graph: dict(graph_parameters(plan.get(graph) or [], provenance=True))
+        for graph in ("graph_spec", "poison_graph_spec")
+    }
+    if (recipe, "graph_spec", None) not in routes and not any(provenance.values()):
         missing.append(
             {
                 "graph": "graph_spec",
                 "reason": "Recipe absent from supplied configuration",
             }
         )
-    bindings = routes.get((recipe, "bindings", None), {})
+    bindings = routes.get((recipe, "bindings", None), {}) | plan.get("binding_specs", {})
     for graph in ("graph_spec", "poison_graph_spec", "bindings"):
         poison = plan.get("poison_id") if graph == "poison_graph_spec" else None
         definitions = routes.get((recipe, graph, poison), {})
@@ -276,6 +285,7 @@ def extract_parameters(
             }
         else:
             actual = graph_parameters(plan.get(graph) or [])
+            definitions = definitions | provenance[graph]
         seen = set()
         location_counts = Counter(location for location, _ in actual)
         for location, value in actual:

@@ -36,7 +36,7 @@ def main():
         ("audit", "plot_fits.py", ["--output-dir", str(args.output_dir / "fits")]),
         ("audit", "plot_empirical_fits.py", ["--output-dir", str(args.output_dir / "empirical_fits")]),
     ]
-    subprocess.run([sys.executable, "-m", "pytest", "tests/test_plan_audit.py", "-q"], cwd=root, check=True)
+    subprocess.run([sys.executable, "-m", "pytest", "tests", "-q"], cwd=root, check=True)
     start = next(index for index, (stage, _, _) in enumerate(jobs) if stage == args.start_at)
     environment = os.environ | {"MPLCONFIGDIR": "/tmp/rime-reproduction-matplotlib", "TQDM_DISABLE": "1", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
     results = []
