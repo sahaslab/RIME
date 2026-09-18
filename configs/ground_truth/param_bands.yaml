@@ -8,8 +8,13 @@
 # a band no sampled value can reach.
 #
 # Editing guideline:
-# - put band edges on the midpoints between the `samples` landmarks of the
-#   referenced distribution, so each landmark lands in a distinct band
+# - cut band edges against whatever landmarks the referenced distribution
+#   offers. The hand-written priors declared `samples`, and edges went on the
+#   midpoints between them so each landmark landed in a distinct band. The
+#   fitted priors carry no samples: a `histogram` offers its bin `edges`, which
+#   are better landmarks still because each carries a weight, so edges can be
+#   placed to give every band real probability mass. `normal` and `uniform`
+#   offer only `low` and `high`.
 # - `suggested_terms` are suggestions handed to the writer, never a required
 #   vocabulary; order them most literal first
 # - bands are half-open [previous upper, upper); the first band has no lower
@@ -166,11 +171,19 @@ param_bands:
           suggested_terms: [moderate, medium]
         - upper: 0.66
           suggested_terms: [deep, lush, wide]
+    # Chorus is now routed two ways, and `mix` means different things in each:
+    # `modulation_texture` is a serial insert that samples it as a real blend
+    # amount, while `target_chorus_send` pins it to 1.0 on a fully wet send
+    # where the audible amount lives on the send_return levels instead. Because
+    # a 1.0 here is routing rather than intensity, this parameter no longer
+    # feeds the chain magnitude aggregate -- reading it as magnitude would
+    # report every chorus send as maximally applied, the same mistake that
+    # reverb's pinned wet_level was carved out to avoid. Serial chorus
+    # intensity still comes through `depth`.
     mix:
-      role: magnitude
+      role: character
       direction: ascending
       unit: normalized
-      weight: 1.5
       sample_refs: [tone.modulation.chorus.mix]
       bands:
         - upper: 0.325
@@ -179,6 +192,8 @@ param_bands:
           suggested_terms: [clearly present, obvious]
         - upper: 0.61
           suggested_terms: [heavily blended, prominent, front-and-centre]
+        - upper: 1.01
+          suggested_terms: [fully wet, the whole signal through the effect]
     centre_delay_ms:
       role: ignore
       note: Pinned to 7.0 by the modulation motif.
@@ -210,14 +225,18 @@ param_bands:
       sample_refs:
         - vocals.compression.ratio
         - drums.parallel_compression.ratio
+      # Edges are histogram bin boundaries from the fitted prior, which now
+      # spans 1.4 to 8.8 rather than the old hand-written {4, 6, 8, 12}. The old
+      # top band started at 10 and was unreachable. Bin mass per band is
+      # 41 / 25 / 22 / 12 percent, so none of them is dead.
       bands:
-        - upper: 5.0
+        - upper: 2.217
           suggested_terms: [gentle, light leveling]
-        - upper: 7.0
+        - upper: 3.51
           suggested_terms: [moderate control]
-        - upper: 10.0
+        - upper: 5.558
           suggested_terms: [firm, tight]
-        - upper: 20.01
+        - upper: 8.81
           suggested_terms: [heavy, squashed, slammed]
     threshold_db:
       role: magnitude

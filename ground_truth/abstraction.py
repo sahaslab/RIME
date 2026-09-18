@@ -20,13 +20,24 @@ PARAM_ROLES = ("magnitude", "character", "ignore")
 PARAM_DIRECTIONS = ("ascending", "descending", "absolute")
 
 # Distribution kinds and how to read their reachable support out of
-# distributions.yaml. Mirrors DISTRIBUTION_HANDLER_NAMES in planner.py.
+# distributions.yaml. Mirrors DISTRIBUTION_HANDLER_NAMES in planner.py; every
+# kind the planner can resolve needs an entry here or band validation cannot
+# see what that parameter is able to take.
 SUPPORT_HANDLER_NAMES = {
     "choice": "_choice_support",
     "grid": "_choice_support",
     "values": "_choice_support",
     "uniform": "_interval_support",
-    "int_uniform": "_interval_support"
+    "int_uniform": "_interval_support",
+    # The fitted kinds all end by clamping the drawn value into [low, high]
+    # (planner._resolve_fitted_distribution), so that interval is the support
+    # whatever the mean, std or scale.
+    "normal": "_clamped_support",
+    "log_uniform": "_clamped_support",
+    "histogram": "_histogram_support",
+    # A joint models several parameters together, so its support depends on
+    # which parameter is being asked about.
+    "joint": "_joint_support"
 }
 
 # Graph block kinds and the method that pulls parameter bearers out of them.
@@ -593,14 +604,17 @@ class BandLexicon:
     ) -> Support:
         support = Support()
         for ref in spec.sample_refs:
-            support = support.merge(self._distribution_support(ref, distributions))
+            support = support.merge(
+                self._distribution_support(ref, distributions, spec.param)
+            )
         return support.absolute() if spec.direction == "absolute" else support
 
     @classmethod
     def _distribution_support(
         cls,
         ref: str,
-        distributions: Mapping[str, Any]
+        distributions: Mapping[str, Any],
+        param: str
     ) -> Support:
         node: Any = distributions
         for part in ref.split("."):
@@ -609,17 +623,20 @@ class BandLexicon:
             node = node[part]
         if not isinstance(node, Mapping):
             raise ValueError("Distribution '%s' is not a distribution node." % ref)
+        return cls._node_support(node, param, ref)
 
+    @classmethod
+    def _node_support(cls, node: Mapping[str, Any], param: str, ref: str) -> Support:
         distribution_type = node.get("type", "choice")
         handler_name = SUPPORT_HANDLER_NAMES.get(distribution_type)
         if handler_name is None:
             raise ValueError(
                 "Unsupported distribution type '%s' for '%s'." % (distribution_type, ref)
             )
-        return getattr(cls, handler_name)(node)
+        return getattr(cls, handler_name)(node, param, ref)
 
     @staticmethod
-    def _choice_support(spec: Mapping[str, Any]) -> Support:
+    def _choice_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
         points: list[float] = []
         for item in spec.get("values", []):
             value = item["value"] if isinstance(item, Mapping) and "value" in item else item
@@ -628,17 +645,85 @@ class BandLexicon:
         return Support(points=tuple(points))
 
     @staticmethod
-    def _interval_support(spec: Mapping[str, Any]) -> Support:
+    def _interval_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
         low = float(spec["low"])
         high = float(spec["high"])
-        # The declared `samples` are the auditable landmarks band edges are cut
-        # against, so carry them alongside the continuous range.
+        # `samples` is optional: the hand-written priors declared landmark values
+        # for band edges to be cut against, while the fitted priors carry only
+        # the range. Either way the interval is what bounds the parameter.
         points = tuple(
             float(sample)
             for sample in spec.get("samples", [])
             if isinstance(sample, (int, float))
         )
         return Support(points=points, intervals=((low, high),))
+
+    @staticmethod
+    def _clamped_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+        """Support of a fitted distribution: the clamp bounds, nothing more.
+
+        `normal` and `log_uniform` draw from a shape that is unbounded or
+        log-spaced, but the planner clamps every result into [low, high], so no
+        value outside that interval is reachable and the shape parameters say
+        nothing about coverage.
+        """
+        return Support(intervals=((float(spec["low"]), float(spec["high"])),))
+
+    @staticmethod
+    def _histogram_support(spec: Mapping[str, Any], param: str, ref: str) -> Support:
+        """Support of a histogram: one interval per bin that can be drawn from.
+
+        Bins are reported individually rather than as a single [low, high] span
+        so that a zero-weight bin is correctly seen as unreachable -- the
+        planner's bin walk skips those -- and a band covering only such a bin is
+        still reported dead. Edges are read on the linear scale they are written
+        in; `scale: log` affects how the planner interpolates inside a bin, not
+        which values a bin spans.
+        """
+        low = float(spec["low"])
+        high = float(spec["high"])
+        edges = [float(edge) for edge in spec.get("edges", [])]
+        weights = [float(weight) for weight in spec.get("weights", [])]
+        if len(edges) != len(weights) + 1:
+            # Malformed histograms are the planner's to reject; fall back to the
+            # clamp bounds so band validation stays conservative rather than
+            # raising a second, less informative error here.
+            return Support(intervals=((low, high),))
+        intervals = [
+            (max(low, left), min(high, right))
+            for left, right, weight in zip(edges, edges[1:], weights)
+            if weight > 0.0 and max(low, left) < min(high, right)
+        ]
+        return Support(intervals=tuple(intervals)) if intervals else Support(
+            intervals=((low, high),)
+        )
+
+    @classmethod
+    def _joint_support(cls, spec: Mapping[str, Any], param: str, ref: str) -> Support:
+        """Support of one parameter inside a joint distribution.
+
+        A joint draws several correlated parameters at once, so the support for
+        band validation is that of the named parameter, unioned over components.
+        Component weights are not filtered on: enumeration walks every component
+        regardless of weight, so all of them are reachable.
+        """
+        support = Support()
+        available: set[str] = set()
+        for component in spec.get("components", []):
+            parameters = component.get("parameters") or {}
+            available.update(parameters)
+            model = parameters.get(param)
+            if model is not None:
+                support = support.merge(cls._node_support(model, param, ref))
+        if support.is_empty() and available:
+            raise ValueError(
+                "Joint distribution '%s' models %s, not '%s'." % (
+                    ref,
+                    ", ".join(sorted(available)),
+                    param
+                )
+            )
+        return support
 
     @staticmethod
     def _check_coverage(spec: ParamSpec, support: Support) -> None:

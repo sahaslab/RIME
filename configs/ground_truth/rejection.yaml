@@ -79,6 +79,11 @@ rejection:
     # Rows needing a human. Optional; unset means they stay only in `output`.
     review: derived/ground_truth/rejection_review.jsonl
     failures: derived/ground_truth/rejection_failures.jsonl
+    # --generate-full-manifest writes here: every input record in full, with its
+    # verdict attached under a `rejection` key. `output` above stays a compact
+    # sidecar regardless, because that is what --resume reads back and learning
+    # which rows are done should not mean re-parsing every prompt record.
+    full_manifest: derived/ground_truth/rejection_full_manifest.jsonl
 
   run:
     # Attempts per judge call before recording an unparseable verdict.
@@ -89,12 +94,70 @@ rejection:
     subsample_num: -1
     seed: 0
 
+  # MERT embedding similarity between the original and the edited audio, for
+  # --include-mert. Computed by scripts/calculate_ground_truth_similarity.py,
+  # which the filter calls; it can also be run standalone on a GPU node first,
+  # in which case the filter just reads `similarity_path`.
+  #
+  # This is the one criterion that needs audio rather than symbols, and the only
+  # one that can catch an edit too subtle to hear. No rule check can.
+  mert_similarity:
+    # `fadtk` size string. The loader, processor, 24kHz resampling and 6-minute
+    # truncation all come from fadtk.MERTModel, which is already installed in
+    # postmaster-clean -- this adds no dependency.
+    model: MERT-v1-95M
+
+    # `all` means mean over the 13-layer stack, then mean over time. An integer
+    # takes that layer alone.
+    #
+    # Setting this to 12 reproduces an unmodified fadtk.MERTModel() exactly,
+    # which matters: the lab's existing FAD/KAD analysis under
+    # /dartfs/rc/lab/S/SinghN/rime/rime_analysis is single-layer at 12, so 12 is
+    # the setting under which these numbers and those are comparable.
+    layer: all
+
+    # Null autodetects cuda, falling back to cpu.
+    device: null
+
+    # Render manifest mapping (clip_id, plan_id) -> rendered audio. REQUIRED for
+    # --include-mert: this stage never triggers a render itself, since that would
+    # mean booting the MCP server and Demucs. Rows with no rendered audio report
+    # a null similarity with reason `not_rendered`.
+    render_manifest: null
+
+    # Per-file embedding cache, keyed on path + mtime + size + model + layer.
+    # This is what makes the reference side cheap: one clip's baseline is shared
+    # by every plan targeting that stem, so a thousand edited renders need only a
+    # few hundred reference embeddings.
+    cache_dir: derived/ground_truth/mert_cache
+    similarity_path: derived/ground_truth/mert_similarity.jsonl
+
+    # Which "original" to compare against. The render manifest carries three, and
+    # they do not measure the same thing:
+    #   baseline  the no-FX remix -- separated and remixed with no effects, so
+    #             the distance is the effects chain and not Demucs
+    #   source    the untouched recording, which conflates separation loss with
+    #             the edit
+    # `baseline_then_source` prefers the baseline and falls back where none was
+    # rendered, recording per row which it used. Do not pool the two.
+    reference: baseline_then_source
+
+    # Null means report the number and leave the flag's verdict null, so the
+    # similarity is descriptive and rejects nothing. Set a float once a threshold
+    # has been chosen from real data: at or above it, the edit is too close to
+    # the original to be noticeable. The raw value is always written, so
+    # re-thresholding never re-runs MERT.
+    similarity_threshold: null
+
   # Which verdicts reject.
   reject_policy:
     al_rules: [fail]
     al_consistency: [fail]
     joint_params: [implausible]
     stylistic: [inappropriate]
+    # Inert while mert_similarity.similarity_threshold is null, because the flag
+    # carries no verdict until a threshold exists to compare against.
+    similarity: [too_similar]
     # What to do with a verdict not named above: keep | reject | review.
     # Rejecting `unclear` is the tempting default and the wrong one: it biases
     # the corpus against unusual-but-valid edits, and collapsing edit diversity
@@ -104,6 +167,7 @@ rejection:
       default: keep
       joint_params: keep
       stylistic: review
+      similarity: keep
     # A row whose judge call never returned parseable JSON is never silently
     # accepted.
     on_judge_error: review

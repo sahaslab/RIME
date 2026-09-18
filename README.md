@@ -287,6 +287,73 @@ be *placed*: five declared operators are referenced by neither.
 Since the repo has no test suite, `--reachability` and `--dry-run` are the test
 surface: both are deterministic, call no model, and are meant to be diffed.
 
+### Full Manifest
+
+```bash
+python scripts/filter_ground_truth_prompts.py --generate-full-manifest
+```
+
+Writes every input record in full to `paths.full_manifest`, with its verdict
+attached under a single `rejection` key. Input keys are copied through untouched
+and nothing is renamed, so a training job can consume this one file without
+joining anything. The compact sidecar at `paths.output` is still written either
+way: it is what `--resume` reads back, and learning which rows are done should
+not mean re-parsing every prompt record.
+
+It is written under `--dry-run` too, since the manifest's shape is settled by the
+deterministic half and should be checkable without spending a judge call.
+
+### MERT Similarity
+
+```bash
+sbatch scripts/run_calculate_similarity.sbatch                     # embed on a GPU node
+python scripts/filter_ground_truth_prompts.py --include-mert       # then join
+```
+
+Adds a fifth `similarity` flag: the cosine distance in MERT embedding space
+between the original and the edited audio. This is the one criterion that needs
+audio rather than symbols, and the only one that can catch an edit too subtle to
+hear.
+
+[scripts/calculate_ground_truth_similarity.py](scripts/calculate_ground_truth_similarity.py)
+does the work and is runnable on its own; `--include-mert` makes the filter score
+any pair not already in `similarity_path`. Run the sbatch first for anything
+larger than a smoke test — the filter is an I/O-bound Bedrock job and embedding a
+corpus inside it wastes a GPU allocation on waiting for HTTP.
+
+Embedding reuses `fadtk.MERTModel` (`m-a-p/MERT-v1-95M`, 768-dim, 24 kHz),
+already installed in `postmaster-clean`, subclassed to replace only the pooling.
+`layer: all` averages the 13-layer stack then the time axis; `layer: 12`
+reproduces an unmodified `fadtk.MERTModel()` **bit-exactly**, which is the
+setting under which these numbers are comparable to the lab's existing FAD/KAD
+analysis under `/dartfs/rc/lab/S/SinghN/rime/rime_analysis`.
+
+Which "original" is used matters, and the render manifest carries three:
+
+| `reference` | source | measures |
+| --- | --- | --- |
+| `baseline` | `baseline_path`, the no-FX remix | the effects chain alone, since separation artifacts cancel |
+| `source` | `source_copy_path`, else `audio_path` | the edit *plus* Demucs separation loss |
+
+Which one was used is recorded per row, because the two are not poolable. Poison
+plans invert the pair — their `baseline_path` is the *degraded input*, so those
+rows compare the source against the output and are marked `poison_repair`; do
+not pool those either.
+
+`similarity_threshold` is null by default, which keeps the criterion descriptive:
+the cosine is recorded and the flag's verdict stays null, so nothing is rejected
+on a cutoff nobody has chosen from data yet. Set a float and it becomes an
+ordinary rejection reason. The raw value is always written, so re-thresholding
+never re-runs MERT.
+
+Calibrate before trusting a threshold. On real pairs the cosine sits in a very
+narrow band near 1.0 — a gain-only edit measured 0.99889 against its baseline
+where a reverb-plus-delay send measured 0.99836, so the ordering is right but the
+whole signal spans about 5e-4, while the spread *between* clips is two orders of
+magnitude wider. A single global cutoff is therefore unlikely to mean much;
+per-clip normalisation, or a pooling that preserves frame-level differences, is
+the direction to explore.
+
 ## Current Config Layout
 
 - [configs/ground_truth/datasets/mtg_jamendo.yaml](configs/ground_truth/datasets/mtg_jamendo.yaml)
@@ -308,7 +375,8 @@ surface: both are deterministic, call no model, and are meant to be diffed.
 - [configs/ground_truth/summarization.yaml](configs/ground_truth/summarization.yaml)
   Model and run settings for prompt generation
 - [configs/ground_truth/rejection.yaml](configs/ground_truth/rejection.yaml)
-  Rejection criteria: sourced rules, their triggers, and the judge's settings
+  Rejection criteria: sourced rules, their triggers, the judge's settings, and
+  the MERT similarity block
 
 ## Delay Handling
 

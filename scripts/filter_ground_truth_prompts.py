@@ -42,7 +42,9 @@ from ground_truth.rejection import (  # noqa: E402
     index_analysis,
     disposition_for,
     iter_level_jobs,
+    similarity_flag,
     triggered_rules,
+    full_manifest_row,
     render_retry_note,
     render_row_prompt,
     system_prompt_for,
@@ -90,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="Skip rows already written without error.")
     parser.add_argument("--dry-run", action="store_true", help="Print assembled prompts and trigger verdicts; call no model.")
     parser.add_argument("--reachability", action="store_true", help="Print which rules can fire under the current configs, then exit.")
+    parser.add_argument("--generate-full-manifest", action="store_true", help="Also write every input record in full with its verdict attached, to paths.full_manifest.")
+    parser.add_argument("--include-mert", action="store_true", help="Add a MERT original-vs-edited similarity flag, computing any pair not already scored.")
+    parser.add_argument("--render-manifest", type=Path, default=None, help="Render manifest for --include-mert. Default: from rejection.yaml")
+    parser.add_argument("--similarity-path", type=Path, default=None, help="Precomputed similarity JSONL to join, e.g. the sbatch's OUTPUT_PATH. Default: from rejection.yaml")
     return parser.parse_args()
 
 
@@ -187,7 +193,8 @@ def evaluate_row(
     reader: ChainReader,
     ladder: Any,
     analysis_index: Mapping[str, Mapping[str, Any]],
-    dry_run: bool
+    dry_run: bool,
+    similarity_index: Mapping[tuple[str, str], Mapping[str, Any]] | None = None
 ) -> dict[str, Any]:
     """Every selected criterion's verdict for one row."""
     clip_id = str(row.get("clip_id"))
@@ -201,6 +208,13 @@ def evaluate_row(
             flags.update(_evaluate_levels(row, criterion, config, ladder, dry_run, prompts))
             continue
         flags.update(_evaluate_row_criterion(row, criterion, config, context, dry_run, prompts))
+
+    if similarity_index is not None:
+        # Joined rather than computed inline: embedding is a GPU job over audio
+        # and judging is an I/O-bound job over text, so they are separate passes
+        # sharing one artifact.
+        key = (clip_id, str(row.get("plan_id")))
+        flags["similarity"] = similarity_flag(similarity_index.get(key), config.mert)
 
     disposition, reasons = disposition_for(flags, config)
     result = {
@@ -370,6 +384,61 @@ def print_reachability(config: RejectionConfig, config_dir: Path) -> None:
         print("%-22s %d" % (verdict, counts[verdict]))
 
 
+def build_similarity_index(
+    config: RejectionConfig,
+    render_manifest: Path | None,
+    similarity_path: Path | None = None
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The similarity rows for --include-mert, computing any that are missing.
+
+    Imported lazily and by path, because the similarity module pulls in torch
+    and fadtk and a run without --include-mert should not pay for either.
+
+    Scoring here is a convenience for small runs. For a corpus it is far cheaper
+    to run scripts/calculate_ground_truth_similarity.py on a GPU node first, at
+    which point every pair is already in `similarity_path` and this only reads
+    it back.
+    """
+    import importlib.util
+
+    module_path = Path(__file__).resolve().parent / "calculate_ground_truth_similarity.py"
+    spec = importlib.util.spec_from_file_location("ground_truth_similarity", module_path)
+    similarity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(similarity)
+
+    mert = config.mert
+    if similarity_path is not None:
+        mert = replace(mert, similarity_path=similarity_path)
+    manifest_path = render_manifest or mert.render_manifest
+    index = similarity.load_similarity_index(mert.similarity_path)
+    if index:
+        log_event("read %d similarity rows from %s" % (len(index), mert.similarity_path))
+
+    if manifest_path is None:
+        if not index:
+            raise ValueError(
+                "--include-mert needs a render manifest to score pairs, or an existing %s to read. "
+                "Pass --render-manifest or set rejection.mert_similarity.render_manifest." % mert.similarity_path
+            )
+        return index
+
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise ValueError("Render manifest '%s' does not exist." % manifest_path)
+
+    manifest_rows = load_records(manifest_path)
+    unscored = [
+        row for row in manifest_rows
+        if (str(row.get("clip_id")), str(row.get("plan_id"))) not in index
+    ]
+    if unscored:
+        log_event("scoring %d unscored pair(s) with %s layer=%s" % (len(unscored), mert.model, mert.layer))
+        counts = similarity.compute_similarities(unscored, mert, mert.similarity_path, resume=True)
+        log_event("similarity: scored %d, skipped %d, failed %d" % (counts["scored"], counts["skipped"], counts["failed"]))
+        index = similarity.load_similarity_index(mert.similarity_path)
+    return index
+
+
 def main() -> None:
     args = parse_args()
     config = resolve_config(args)
@@ -388,6 +457,13 @@ def main() -> None:
         log_event("re-joined %d analysis records from %s" % (len(analysis_index), config.analysis_path))
     elif config.analysis_path:
         log_event("WARNING: analysis manifest %s not found; the stylistic criterion will report no_caption" % config.analysis_path)
+
+    similarity_index: dict[tuple[str, str], Mapping[str, Any]] | None = None
+    if args.include_mert:
+        similarity_index = build_similarity_index(config, args.render_manifest, args.similarity_path)
+
+    if args.generate_full_manifest and config.full_manifest_path is None:
+        raise ValueError("--generate-full-manifest needs paths.full_manifest set in rejection.yaml.")
 
     rows = load_records(config.prompts_path)
     if config.subsample_num > 0:
@@ -412,16 +488,31 @@ def main() -> None:
         preflight_model(config.model)
 
     if args.dry_run:
+        # The full manifest is written here too, not only on a real run: its
+        # shape is settled by the deterministic half, so it should be checkable
+        # without spending a judge call on it.
+        dry_manifest = None
+        if args.generate_full_manifest:
+            config.full_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            dry_manifest = config.full_manifest_path.open("w", encoding="utf-8")
         for row in pending:
-            result = evaluate_row(row, config, reader, ladder, analysis_index, True)
+            result = evaluate_row(row, config, reader, ladder, analysis_index, True, similarity_index)
             print("=" * 100)
             print("clip %s  plan %s" % (result["clip_id"], result["plan_id"]))
             for flag, payload in result["flags"].items():
                 print("  %-16s %s" % (flag, json.dumps({k: v for k, v in payload.items() if k not in ("per_level", "per_pair")}, sort_keys=True)))
+            if dry_manifest is not None:
+                # The prompts are a dry-run artifact, not part of the verdict.
+                verdict = {key: value for key, value in result.items() if key != "prompts"}
+                dry_manifest.write(json.dumps(full_manifest_row(row, verdict), sort_keys=True))
+                dry_manifest.write("\n")
             for item in result.get("prompts", []):
                 print("-" * 100)
                 print("--- PROMPT [%s] ---" % item["criterion"])
                 print(item["prompt"])
+        if dry_manifest is not None:
+            dry_manifest.close()
+            log_event("wrote the full manifest to %s" % config.full_manifest_path)
         return
 
     mode = "a" if args.resume and config.output_path.exists() else "w"
@@ -430,6 +521,10 @@ def main() -> None:
     if config.review_path:
         config.review_path.parent.mkdir(parents=True, exist_ok=True)
         review_handle = config.review_path.open(mode, encoding="utf-8")
+    manifest_handle = None
+    if args.generate_full_manifest:
+        config.full_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_handle = config.full_manifest_path.open(mode, encoding="utf-8")
 
     written = 0
     failed = 0
@@ -438,7 +533,7 @@ def main() -> None:
     with config.output_path.open(mode, encoding="utf-8") as sink:
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
             futures = {
-                executor.submit(evaluate_row, row, config, reader, ladder, analysis_index, False): row
+                executor.submit(evaluate_row, row, config, reader, ladder, analysis_index, False, similarity_index): row
                 for row in pending
             }
             for future in as_completed(futures):
@@ -460,12 +555,19 @@ def main() -> None:
                     review_handle.write(json.dumps(result, sort_keys=True))
                     review_handle.write("\n")
                     review_handle.flush()
+                if manifest_handle is not None:
+                    manifest_handle.write(json.dumps(full_manifest_row(row, result), sort_keys=True))
+                    manifest_handle.write("\n")
+                    manifest_handle.flush()
                 written += 1
                 if written % 50 == 0:
                     log_event("%d/%d written" % (written, len(pending)))
 
     if review_handle is not None:
         review_handle.close()
+    if manifest_handle is not None:
+        manifest_handle.close()
+        log_event("wrote the full manifest to %s" % config.full_manifest_path)
     log_event("wrote %d rows (%d failed) to %s" % (written, failed, config.output_path))
 
 

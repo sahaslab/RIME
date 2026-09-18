@@ -73,6 +73,15 @@ DISPOSITION_REVIEW = "review"
 
 UNCLEAR_ACTIONS = ("keep", "reject", "review")
 
+# The `similarity` flag's verdict when a threshold is configured and met. Named
+# rather than boolean so it reads the same way in `reject_reasons` as the enum
+# verdicts do.
+VERDICT_TOO_SIMILAR = "too_similar"
+VERDICT_AUDIBLE = "audible"
+
+# Which manifest field supplies the A-side of the comparison.
+REFERENCE_MODES = ("baseline_then_source", "baseline_only", "source_only")
+
 # First balanced `{...}` run in a model response. Models wrap JSON in prose and
 # code fences however they like, so the parse is lenient by design and the
 # schema check downstream is what actually rejects a bad response.
@@ -126,6 +135,69 @@ class Criterion:
 
 
 @dataclass(frozen=True)
+class MertSimilarityConfig:
+    """How to measure the distance between the original and the edited audio."""
+
+    model: str = "MERT-v1-95M"
+    # "all" means mean over the layer stack; an int takes that layer alone. 12
+    # reproduces an unmodified fadtk.MERTModel(), which is the setting under
+    # which these numbers are comparable to the lab's existing FAD/KAD run.
+    layer: str = "all"
+    device: str | None = None
+    render_manifest: Path | None = None
+    cache_dir: Path = Path("derived/ground_truth/mert_cache")
+    similarity_path: Path = Path("derived/ground_truth/mert_similarity.jsonl")
+    reference: str = "baseline_then_source"
+    # Null keeps the criterion descriptive: the value is recorded and the flag's
+    # verdict stays None, so nothing is rejected on a threshold nobody has
+    # chosen from data yet.
+    similarity_threshold: float | None = None
+
+    @property
+    def numeric_layer(self) -> int:
+        """The layer fadtk should select, for the single-layer case."""
+        return 12 if self.pools_all_layers else int(self.layer)
+
+    @property
+    def pools_all_layers(self) -> bool:
+        return str(self.layer).lower() == "all"
+
+    @property
+    def model_key(self) -> str:
+        """Model identity for the cache key, so a layer change invalidates it."""
+        return "%s-layer_%s" % (self.model, self.layer)
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any], context: str) -> "MertSimilarityConfig":
+        layer = section.get("layer", "all")
+        if str(layer).lower() != "all":
+            try:
+                index = int(layer)
+            except (TypeError, ValueError):
+                raise ValueError("Rejection config '%s' sets mert_similarity.layer to %r; expected 'all' or an integer 1-12." % (context, layer)) from None
+            if not 1 <= index <= 12:
+                raise ValueError("Rejection config '%s' sets mert_similarity.layer to %d; MERT-v1-95M has layers 1-12." % (context, index))
+        reference = section.get("reference", "baseline_then_source")
+        if reference not in REFERENCE_MODES:
+            raise ValueError("Rejection config '%s' sets mert_similarity.reference to '%s'; expected one of %s." % (context, reference, ", ".join(REFERENCE_MODES)))
+        threshold = section.get("similarity_threshold")
+        if threshold is not None:
+            threshold = float(threshold)
+            if not -1.0 <= threshold <= 1.0:
+                raise ValueError("Rejection config '%s' sets mert_similarity.similarity_threshold to %s; a cosine similarity lies in [-1, 1]." % (context, threshold))
+        return cls(
+            model=str(section.get("model", "MERT-v1-95M")),
+            layer=str(layer),
+            device=(str(section["device"]).strip() or None) if section.get("device") else None,
+            render_manifest=_optional_path(section, "render_manifest"),
+            cache_dir=Path(str(section.get("cache_dir", "derived/ground_truth/mert_cache"))).expanduser(),
+            similarity_path=Path(str(section.get("similarity_path", "derived/ground_truth/mert_similarity.jsonl"))).expanduser(),
+            reference=str(reference),
+            similarity_threshold=threshold
+        )
+
+
+@dataclass(frozen=True)
 class RejectionConfig:
     """Everything the rejection stage runs by."""
 
@@ -135,6 +207,8 @@ class RejectionConfig:
     output_path: Path
     review_path: Path | None
     failures_path: Path | None
+    full_manifest_path: Path | None
+    mert: MertSimilarityConfig
     max_attempts: int
     max_workers: int
     criteria: tuple[Criterion, ...]
@@ -200,6 +274,8 @@ class RejectionConfig:
             output_path=_required_path(paths, "output", path),
             review_path=_optional_path(paths, "review"),
             failures_path=_optional_path(paths, "failures"),
+            full_manifest_path=_optional_path(paths, "full_manifest"),
+            mert=MertSimilarityConfig.from_mapping(section.get("mert_similarity") or {}, str(path)),
             max_attempts=max_attempts,
             max_workers=max_workers,
             criteria=criteria,
@@ -571,7 +647,9 @@ def _param_support(
         return None
     support = Support()
     for ref in spec.sample_refs:
-        support = support.merge(BandLexicon._distribution_support(ref, distributions))
+        # `param` is required: a `joint` prior models several parameters
+        # together, so its support depends on which one is being asked about.
+        support = support.merge(BandLexicon._distribution_support(ref, distributions, param))
     literal = literals.get("%s.%s" % (operator, param))
     if literal is not None:
         support = support.merge(literal)
@@ -973,6 +1051,69 @@ def disposition_for(
     if review_reasons:
         return DISPOSITION_REVIEW, tuple(review_reasons)
     return DISPOSITION_ACCEPT, ()
+
+
+def similarity_flag(
+    row: Mapping[str, Any] | None,
+    config: MertSimilarityConfig
+) -> dict[str, Any]:
+    """The `similarity` flag for one record, from a precomputed similarity row.
+
+    The verdict is `None` whenever no threshold is configured, which is the
+    default: the cosine is recorded and nothing is rejected on a cutoff nobody
+    has chosen from data yet. `reject_policy.unclear.similarity` then decides
+    what a null verdict does, exactly as it does for the enum criteria.
+
+    The raw value is always carried, so re-thresholding never means re-running
+    MERT over the corpus.
+    """
+    flag: dict[str, Any] = {
+        "verdict": None,
+        "model": config.model,
+        "layer": config.layer,
+        "threshold": config.similarity_threshold
+    }
+    if row is None:
+        flag["reason"] = "not_scored"
+        return flag
+    if row.get("error"):
+        flag["reason"] = "similarity_error"
+        flag["error"] = row["error"]
+        return flag
+
+    value = row.get("similarity")
+    flag["value"] = value
+    for key in ("reference", "poison_repair", "render_status"):
+        if key in row:
+            flag[key] = row[key]
+    if value is None:
+        flag["reason"] = row.get("reason") or "not_scored"
+        return flag
+    if config.similarity_threshold is None:
+        return flag
+    # At or above the threshold, the edit is too close to the original to be
+    # noticeable, which is the thing this criterion exists to catch.
+    flag["verdict"] = VERDICT_TOO_SIMILAR if float(value) >= config.similarity_threshold else VERDICT_AUDIBLE
+    return flag
+
+
+def full_manifest_row(
+    record: Mapping[str, Any],
+    verdict: Mapping[str, Any]
+) -> dict[str, Any]:
+    """One input record in full, with its verdict attached.
+
+    The input keys are copied through untouched and the verdict lands under a
+    single `rejection` key, so a consumer of the prompt schema keeps working and
+    a training job needs no join. Nothing is dropped and nothing is renamed.
+    """
+    row = dict(record)
+    row["rejection"] = {
+        key: value
+        for key, value in verdict.items()
+        if key not in ("clip_id", "plan_id")
+    }
+    return row
 
 
 def index_analysis(records: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:

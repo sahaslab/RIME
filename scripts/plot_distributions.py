@@ -5,15 +5,18 @@ unit plotted here is the level-2 `<family>.<effect>` node (e.g. `vocals.compress
 leaf distribution beneath it becomes one subplot titled "<parameter>: <type>", and the panel is
 written to <output-dir>/<family>_<effect>.pdf.
 
-Rendering is fully deterministic: choice supports are drawn from their declared weights and
-uniform ranges from their closed-form density, so no RNG is involved and the PDFs are
-byte-reproducible across runs.
+A `joint` leaf is a weighted mixture over whole parameter sets, so it expands into one subplot
+per parameter showing that parameter's mixture marginal, resampled onto a common grid (its
+components can disagree on both bin edges and kind).
+
+Rendering is fully deterministic: every kind is drawn from its declared weights or its
+closed-form density, so no RNG is involved and the PDFs are byte-reproducible across runs.
 """
 
 import math
 import argparse
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import yaml
 import matplotlib
 from typing import Any
@@ -29,9 +32,13 @@ OUTPUT_DIR = Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/figures/distr
 # One series per subplot, so a single categorical slot is all that is needed. Landmarks and
 # text wear ink tokens rather than a second hue: status colors stay reserved for status.
 SERIES = "#2a78d6"
+SURFACE = "#ffffff"
 INK = "#0b0b0b"
 INK_MUTED = "#52514e"
 GRID = "#dedcd6"
+
+# Bins used when a joint's components must be resampled onto one common grid.
+MARGINAL_BINS = 24
 
 
 def stage(message: str) -> None:
@@ -39,8 +46,10 @@ def stage(message: str) -> None:
 
 
 def format_value(value: Any) -> str:
-    """Trim trailing zeros on floats so ticks read 3800 and -3 rather than 3800.0 and -3.0."""
-    return "%g" % value if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+    """Trim trailing zeros so ticks read 3800 and -3 rather than 3800.0 and -3.0."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return str(value)
+    return "%g" % round(value, 4 if abs(value) < 100.0 else 1)
 
 
 def is_leaf(node: Mapping[str, Any]) -> bool:
@@ -60,10 +69,24 @@ def choice_values(spec: Mapping[str, Any]) -> list[tuple[Any, float]]:
     return sorted(pairs, key=lambda pair: pair[0]) if numeric else pairs
 
 
+def joint_leaves(spec: Mapping[str, Any], prefix: str) -> list[tuple[str, Mapping[str, Any]]]:
+    """Expand a joint into one pseudo-leaf per parameter, carrying that parameter's mixture."""
+    names: list[str] = []
+    for component in spec.get("components", []):
+        for name in component.get("parameters", {}):
+            if name not in names:
+                names.append(name)
+    leaves = []
+    for name in names:
+        parts = [(float(component.get("weight", 1.0)), component["parameters"][name]) for component in spec["components"] if name in component.get("parameters", {})]
+        leaves.append(("%s.%s" % (prefix, name) if prefix else name, {"type": "joint", "parts": parts}))
+    return leaves
+
+
 def collect_leaves(node: Mapping[str, Any], prefix: str = "") -> list[tuple[str, Mapping[str, Any]]]:
     """(name relative to the effect node, leaf spec) pairs, in file order."""
     if is_leaf(node):
-        return [(prefix, node)]
+        return joint_leaves(node, prefix) if node.get("type") == "joint" else [(prefix, node)]
     leaves: list[tuple[str, Mapping[str, Any]]] = []
     for key, child in node.items():
         if isinstance(child, Mapping):
@@ -97,6 +120,67 @@ def style_axes(axes: Axes) -> None:
     axes.tick_params(colors=INK_MUTED, labelsize=8, length=3, width=0.6)
 
 
+def set_edge_ticks(axes: Axes, edges: Sequence[float], log_scale: bool) -> None:
+    """Label at most five bin edges, so a 24-bin marginal keeps a readable axis."""
+    if log_scale and edges[0] > 0.0:
+        axes.set_xscale("log")
+        axes.minorticks_off()
+    step = max(1, (len(edges) - 1) // 4)
+    ticks = list(edges[::step])
+    if ticks[-1] != edges[-1]:
+        ticks.append(edges[-1])
+    axes.set_xticks(ticks)
+    axes.set_xticklabels([format_value(value) for value in ticks])
+
+
+def draw_bins(axes: Axes, edges: Sequence[float], mass: Sequence[float], log_scale: bool) -> None:
+    """Shared bar drawing for anything already reduced to (bin edges, probability mass)."""
+    widths = [edges[index + 1] - edges[index] for index in range(len(mass))]
+    axes.bar(edges[:-1], mass, width=widths, align="edge", color=SERIES, edgecolor=SURFACE, linewidth=0.5)
+    axes.set_xlim(edges[0], edges[-1])
+    axes.set_ylim(0.0, max(mass) * 1.2 if max(mass) > 0.0 else 1.0)
+    set_edge_ticks(axes, edges, log_scale)
+    axes.set_ylabel("probability", color=INK_MUTED, fontsize=8)
+
+
+def grid_edges(low: float, high: float, bins: int, log_scale: bool) -> list[float]:
+    """Common bin edges for a resampled marginal, geometric when the prior is log-scaled."""
+    if log_scale and low > 0.0:
+        ratio = (high / low) ** (1.0 / bins)
+        return [low * (ratio**index) for index in range(bins + 1)]
+    step = (high - low) / bins
+    return [low + (step * index) for index in range(bins + 1)]
+
+
+def add_point_mass(edges: Sequence[float], mass: list[float], value: float, amount: float) -> None:
+    for index in range(len(mass)):
+        if edges[index] <= value <= edges[index + 1]:
+            mass[index] += amount
+            return
+    mass[0 if value < edges[0] else -1] += amount
+
+
+def add_interval_mass(edges: Sequence[float], mass: list[float], low: float, high: float, amount: float) -> None:
+    """Spread one source bin's mass across the common grid in proportion to overlap."""
+    if high <= low:
+        add_point_mass(edges, mass, low, amount)
+        return
+    for index in range(len(mass)):
+        overlap = min(high, edges[index + 1]) - max(low, edges[index])
+        if overlap > 0.0:
+            mass[index] += amount * (overlap / (high - low))
+
+
+def component_support(spec: Mapping[str, Any]) -> tuple[float, float]:
+    if distribution_kind(spec) == "choice":
+        values = [float(value) for value, _ in choice_values(spec)]
+        return min(values), max(values)
+    edges = spec.get("edges")
+    if edges:
+        return float(edges[0]), float(edges[-1])
+    return float(spec["low"]), float(spec["high"])
+
+
 def plot_choice(axes: Axes, spec: Mapping[str, Any]) -> None:
     """Bar chart of normalized probability over an explicit, enumerable support."""
     pairs = choice_values(spec)
@@ -111,20 +195,88 @@ def plot_choice(axes: Axes, spec: Mapping[str, Any]) -> None:
 
 
 def plot_uniform(axes: Axes, spec: Mapping[str, Any]) -> None:
-    """Exact flat density over [low, high], with the declared `samples` landmarks marked."""
+    """Exact flat density over [low, high], with any declared `samples` landmarks marked."""
     low = float(spec["low"])
     high = float(spec["high"])
     span = high - low
     density = 1.0 / span if span > 0.0 else 0.0
-    landmarks = [float(value) for value in spec.get("samples", [low, high])]
+    landmarks = [float(value) for value in spec.get("samples", [])]
     axes.fill_between([low, high], 0.0, density, color=SERIES, alpha=0.22, linewidth=0.0)
     axes.plot([low, high], [density, density], color=SERIES, linewidth=2.0)
-    axes.vlines(landmarks, 0.0, density, color=INK_MUTED, linewidth=1.0, linestyles=(0, (3, 3)))
-    axes.set_xticks(landmarks)
-    axes.set_xticklabels([format_value(value) for value in landmarks])
+    if landmarks:
+        axes.vlines(landmarks, 0.0, density, color=INK_MUTED, linewidth=1.0, linestyles=(0, (3, 3)))
+    ticks = landmarks or [low, high]
+    axes.set_xticks(ticks)
+    axes.set_xticklabels([format_value(value) for value in ticks])
     axes.set_xlim(low - (span * 0.08 or 0.5), high + (span * 0.08 or 0.5))
     axes.set_ylim(0.0, density * 1.35 if density > 0.0 else 1.0)
     axes.set_ylabel("density", color=INK_MUTED, fontsize=8)
+
+
+def plot_histogram(axes: Axes, spec: Mapping[str, Any]) -> None:
+    """Empirical bins exactly as declared: bar i spans edges[i]..edges[i+1] at weights[i]."""
+    edges = [float(value) for value in spec["edges"]]
+    draw_bins(axes, edges, [float(value) for value in spec["weights"]], spec.get("scale") == "log")
+
+
+def plot_normal(axes: Axes, spec: Mapping[str, Any]) -> None:
+    """Normal density truncated to the observed [low, high], with the mean marked."""
+    low = float(spec["low"])
+    high = float(spec["high"])
+    mean = float(spec["mean"])
+    std = float(spec["std"]) or 1.0
+    xs = [low + ((high - low) * index / 200.0) for index in range(201)]
+    ys = [math.exp(-0.5 * (((x - mean) / std) ** 2)) / (std * math.sqrt(2.0 * math.pi)) for x in xs]
+    axes.fill_between(xs, 0.0, ys, color=SERIES, alpha=0.22, linewidth=0.0)
+    axes.plot(xs, ys, color=SERIES, linewidth=2.0)
+    axes.vlines([mean], 0.0, max(ys), color=INK_MUTED, linewidth=1.0, linestyles=(0, (3, 3)))
+    axes.annotate("mean %s" % format_value(mean), xy=(mean, max(ys)), xytext=(0, 3), textcoords="offset points", ha="center", color=INK_MUTED, fontsize=7)
+    axes.set_xticks([low, mean, high])
+    axes.set_xticklabels([format_value(value) for value in (low, mean, high)])
+    axes.set_xlim(low, high)
+    axes.set_ylim(0.0, max(ys) * 1.35)
+    axes.set_ylabel("density", color=INK_MUTED, fontsize=8)
+
+
+def plot_joint(axes: Axes, spec: Mapping[str, Any]) -> None:
+    """Weighted mixture marginal for one parameter of a joint, resampled onto a common grid."""
+    parts = spec["parts"]
+    note = "marginal of %d-component mixture" % len(parts)
+    if all(distribution_kind(part) == "choice" for _, part in parts):
+        # An all-discrete mixture is still a discrete support: merge it and draw real bars
+        # rather than scattering two point masses across a continuous grid.
+        merged: dict[float, float] = {}
+        for weight, part in parts:
+            pairs = choice_values(part)
+            total = sum(item for _, item in pairs) or 1.0
+            for value, item in pairs:
+                merged[float(value)] = merged.get(float(value), 0.0) + (weight * item / total)
+        plot_choice(axes, {"type": "choice", "values": [{"value": value, "weight": item} for value, item in sorted(merged.items())]})
+        axes.annotate(note, xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top", color=INK_MUTED, fontsize=7)
+        return
+    supports = [component_support(part) for _, part in parts]
+    low = min(bound[0] for bound in supports)
+    high = max(bound[1] for bound in supports)
+    if high <= low:
+        high = low + 1.0
+    log_scale = low > 0.0 and any(part.get("scale") == "log" for _, part in parts)
+    edges = grid_edges(low, high, MARGINAL_BINS, log_scale)
+    mass = [0.0] * MARGINAL_BINS
+    for weight, part in parts:
+        if distribution_kind(part) == "choice":
+            pairs = choice_values(part)
+            total = sum(item for _, item in pairs) or 1.0
+            for value, item in pairs:
+                add_point_mass(edges, mass, float(value), weight * (item / total))
+            continue
+        if "edges" in part:
+            part_edges = [float(value) for value in part["edges"]]
+            for index, bin_weight in enumerate(part["weights"]):
+                add_interval_mass(edges, mass, part_edges[index], part_edges[index + 1], weight * float(bin_weight))
+            continue
+        add_interval_mass(edges, mass, float(part["low"]), float(part["high"]), weight)
+    draw_bins(axes, edges, mass, log_scale)
+    axes.annotate(note, xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top", color=INK_MUTED, fontsize=7)
 
 
 def plot_unsupported(axes: Axes, spec: Mapping[str, Any]) -> None:
@@ -134,14 +286,17 @@ def plot_unsupported(axes: Axes, spec: Mapping[str, Any]) -> None:
     axes.set_yticks([])
 
 
-# Kind -> panel renderer. Aliases mirror DISTRIBUTION_HANDLER_NAMES (ground_truth/planner.py)
-# and SUPPORT_HANDLER_NAMES (ground_truth/abstraction.py); keep the three tables in step.
+# Kind -> panel renderer. The choice aliases mirror DISTRIBUTION_HANDLER_NAMES
+# (ground_truth/planner.py) and SUPPORT_HANDLER_NAMES (ground_truth/abstraction.py).
 RENDERERS = {
     "choice": plot_choice,
     "grid": plot_choice,
     "values": plot_choice,
     "uniform": plot_uniform,
-    "int_uniform": plot_uniform
+    "int_uniform": plot_uniform,
+    "histogram": plot_histogram,
+    "normal": plot_normal,
+    "joint": plot_joint
 }
 
 
@@ -181,6 +336,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     total = 0
+    panels = 0
     for effect_path, node in effect_nodes(distributions):
         leaves = [(name or effect_path.split(".")[-1], spec) for name, spec in collect_leaves(node)]
         if not leaves:
@@ -188,8 +344,9 @@ def main() -> None:
             continue
         path = plot_effect(effect_path, leaves, args.output_dir)
         total += len(leaves)
+        panels += 1
         stage("%s -> %s (%d parameters)" % (effect_path, path.name, len(leaves)))
-    stage("wrote %d parameters across %d panels to %s" % (total, len(effect_nodes(distributions)), args.output_dir))
+    stage("wrote %d parameters across %d panels to %s" % (total, panels, args.output_dir))
 
 
 if __name__ == "__main__":
