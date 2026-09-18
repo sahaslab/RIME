@@ -284,12 +284,69 @@ def integrate(config: dict[str, Any], priors: dict[str, Any]) -> None:
                 ),
             )
     integrate_time_recipes(config, priors["recipe_evidence"])
+    apply_authored_ranges(config)
     assert len({item["id"] for item in recipes}) == len(recipes)
+
+
+def apply_authored_ranges(config: dict[str, Any]) -> None:
+    # Authored support ranges, independent of fitted corpus parameters.
+    ranges = {
+        "tone.modulation.chorus.centre_delay_ms": ("uniform", 20.0, 50.0),
+        "tone.modulation.chorus.feedback": ("uniform", 0.0, 0.3),
+        "drums.parallel_compression.attack_ms": ("log_uniform", 2.0, 10.0),
+        "drums.parallel_compression.release_ms": ("log_uniform", 40.0, 100.0),
+        "tone.equalization.shelf_q": ("log_uniform", 0.5, 1.0),
+        "dynamics.limiter.threshold_db": ("uniform", -12.0, -6.0),
+        "dynamics.limiter.release_ms": ("log_uniform", 60.0, 150.0),
+        "space.shared_send.delay.mix": ("uniform", 0.3, 0.6),
+        "space.shared_send.reverb.wet_level": ("uniform", 0.4, 0.7),
+        "space.shared_send.reverb.dry_level": ("uniform", 0.5, 1.0),
+        "space.shared_send.reverb.width": ("uniform", 0.5, 1.0),
+    }
+    for reference, (kind, low, high) in ranges.items():
+        branch = config["distributions.yaml"]["distributions"]
+        parts = reference.split(".")
+        for part in parts[:-1]:
+            branch = branch.setdefault(part, {})
+        branch[parts[-1]] = {"type": kind, "low": low, "high": high}
+    references = {
+        "apply_chorus_effect": {
+            "centre_delay_ms": "tone.modulation.chorus.centre_delay_ms",
+            "feedback": "tone.modulation.chorus.feedback",
+        },
+        "apply_compressor_effect": {
+            "attack_ms": "drums.parallel_compression.attack_ms",
+            "release_ms": "drums.parallel_compression.release_ms",
+        },
+        "apply_highshelf_filter": {"q": "tone.equalization.shelf_q"},
+        "apply_lowshelf_filter": {"q": "tone.equalization.shelf_q"},
+        "apply_limiter_effect": {
+            "threshold_db": "dynamics.limiter.threshold_db",
+            "release_ms": "dynamics.limiter.release_ms",
+        },
+        "apply_reverb_effect": {
+            "width": "space.shared_send.reverb.width",
+            "dry_level": "space.shared_send.reverb.dry_level",
+        },
+    }
+    for motif in config["motifs.yaml"]["motifs"].values():
+        for step in motif["steps"]:
+            params = step["params"]
+            if step["operator"] == "apply_reverb_effect":
+                params["freeze_mode"] = 0.0
+            for name, reference in references.get(step["operator"], {}).items():
+                if isinstance(params.get(name), (int, float)):
+                    if name == "dry_level" and params[name] == 0.0:
+                        continue
+                    params[name] = {"sample": reference}
 
 
 def continuous_defaults(distributions: dict[str, Any], prefix: str = "") -> None:
     # Musical subdivisions and pitch intervals are genuinely discrete.
-    discrete = {"space.shared_send.delay.synced.beats", "vocals.harmony.intervals"}
+    discrete = {
+        "space.shared_send.delay.synced.beats",
+        "vocals.harmony.intervals",
+    }
     for name, spec in distributions.items():
         path = prefix + "." + name if prefix else name
         if spec.get("type") in {"uniform", "int_uniform", "log_uniform"}:

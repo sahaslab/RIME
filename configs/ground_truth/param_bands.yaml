@@ -201,10 +201,10 @@ param_bands:
           suggested_terms: [fully wet, the whole signal through the effect]
     centre_delay_ms:
       role: ignore
-      note: Pinned to 7.0 by the modulation motif.
+      note: Sampled uniformly over 20–50 ms.
     feedback:
       role: ignore
-      note: Pinned to 0.0 by the modulation motif.
+      note: Sampled uniformly over 0.0–0.3.
 
   apply_distortion_effect:
     drive_db:

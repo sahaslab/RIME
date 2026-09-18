@@ -1,29 +1,35 @@
 """Turn the sampling priors in distributions.yaml into UI-ready parameter controls.
 
-Every control carries the support to clamp a slider to, the central value to open
-it at, and the weighted options behind a dropdown, so a caller can offer exactly
-the values the pipeline could have sampled and no others.
+A continuous prior becomes a dropdown of its own deciles, so every option is an
+equally likely tenth of that prior. That reports the shape a slider cannot show
+-- several of these priors are fitted over a support far wider than the mass
+they carry, and the high-shelf `q` fitted over 0.1..50 puts 80% of its draws
+between 0.4 and 1.4, which is under 2% of a linear track -- and it sidesteps
+whether a 20 Hz..20 kHz support should be travelled linearly or in log. A caller
+is expected to offer a free numeric field alongside, since the deciles
+constrain and should not trap.
 
 Effects are addressed the way recipes.yaml addresses them -- recipe, then step --
 because distributions.yaml is organized by workflow family rather than by
 operator. A parameter's prior is only discoverable through the step that samples
 it, so there is no useful "list the effects" view that skips the recipe.
 
-Deliberately torch-free: standard library and yaml only. graph/edit_graph.py
-imports torch at module scope and ground_truth/runtime.py and planner.py pull it
-in transitively, which is far too heavy for reading config.
+No torch: graph/edit_graph.py imports it at module scope and
+ground_truth/runtime.py and planner.py pull it in transitively, which is far too
+heavy for reading config. Otherwise the standard library and yaml, plus scipy
+for the `beta` and truncated-`normal` quantiles -- imported lazily in the one
+function that needs them, exactly as planner.py does.
 
 Distribution semantics mirror GroundTruthPlanner's handlers
-(ground_truth/planner.py:1557-1682). Central values are what
-`_resolve_fitted_distribution` returns at probability 0.5 -- its middle
-enumerate-mode quantile -- so a control's default is the same "typical" value
-the planner would enumerate.
+(ground_truth/planner.py:1463-1592), including the seven scalar kinds and the
+three spellings of a prior over correlated parameters. Central values are the
+median, which is what `_resolve_fitted_distribution` returns at probability 0.5
+-- its middle enumerate-mode quantile -- so a control's default is the same
+"typical" value the planner would enumerate.
 """
-
 import math
 import argparse
 from pathlib import Path
-from statistics import NormalDist
 from collections.abc import Mapping, Sequence
 import yaml
 from typing import Any
@@ -53,19 +59,37 @@ BUS_LEVEL_PARAMS = ("dry_level", "send_level", "return_level")
 BUS_PINNED_PARAMS = {"dry_level": 0.0, "wet_level": 1.0, "mix": 1.0}
 
 # Distribution kinds resolved by a single fitted-quantile walk.
-FITTED_KINDS = {"normal", "histogram", "log_uniform"}
+FITTED_KINDS = {"normal", "histogram", "log_uniform", "beta", "power_law"}
+
+# Kinds whose support is logarithmic whether or not `scale: log` is spelled out.
+ALWAYS_LOG_KINDS = {"log_uniform", "power_law"}
+
+# Weighted sets of sub-distributions. A `gaussian_mixture` names only mean/std
+# per component and keeps the bounds on the mixture itself; a `mixture` carries a
+# whole nested spec per component under `distribution`.
+MIXTURE_KINDS = {"mixture", "gaussian_mixture"}
+
+# Kinds that resolve to a whole params mapping rather than a single value, so a
+# recipe attaches them with `sample:` at the params level rather than under one
+# param name. `joint` is the older spelling and no longer appears in the configs,
+# but the planner still resolves it.
+GROUP_KINDS = {"parameters", "joint"}
 
 # Distribution kinds whose `values` list makes them a dropdown.
 CHOICE_KINDS = {"choice", "grid", "values"}
 
-# Slider granularity. The priors are continuous, so this is only a UI step.
-SLIDER_STEPS = 200
+# Probabilities offered for a continuous prior: each option is an equally likely
+# tenth of that prior.
+DECILE_PROBABILITIES = tuple(step / 10.0 for step in range(1, 10))
+
+# Probability-grid resolution used to invert a mixture numerically.
+MIXTURE_GRID = 1024
 
 # The special param forms a recipe may use in place of a literal, from
-# SPECIAL_VALUE_HANDLER_NAMES (planner.py:40).
+# SPECIAL_VALUE_HANDLER_NAMES (planner.py:36).
 SPECIAL_VALUE_KEYS = ("coalesce", "ref", "sample", "scale", "tempo_sync")
 
-# Control id used for a joint distribution's mixture-component picker.
+# Control id used for a group distribution's component picker.
 COMPONENT_CONTROL_ID = "__component__"
 
 
@@ -128,14 +152,19 @@ def choice_options(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def fitted_quantile(spec: Mapping[str, Any], probability: float) -> float:
-    """Inverse CDF of a normal, histogram or log_uniform leaf.
+    """Inverse CDF of one scalar fitted leaf.
 
-    A verbatim port of `_resolve_fitted_distribution` (planner.py:1599) for a
-    single probability, so a control's bounds and default agree exactly with
-    what the planner would sample or enumerate.
+    A port of `_resolve_fitted_distribution` (planner.py:1538) for a single
+    probability, so a control's bounds and default agree exactly with what the
+    planner would sample. `beta` and `normal` go through scipy for the same
+    reason: matching the planner's own ppf beats a hand-rolled approximation.
+
+    For a log-scaled leaf every fitted parameter -- a normal's mean and std, a
+    histogram's edges, a power law's exponent -- lives in log space, and only
+    the final value comes back through exp().
     """
     kind = str(spec["type"])
-    logarithmic = spec.get("scale") == "log" or kind == "log_uniform"
+    logarithmic = spec.get("scale") == "log" or kind in ALWAYS_LOG_KINDS
     low, high = float(spec["low"]), float(spec["high"])
     if not low < high:
         raise ValueError("Distribution needs low < high, got low=%r high=%r." % (low, high))
@@ -145,13 +174,32 @@ def fitted_quantile(spec: Mapping[str, Any], probability: float) -> float:
 
     if kind == "log_uniform":
         value = lower_bound + probability * (upper_bound - lower_bound)
+    elif kind == "beta":
+        from scipy.special import betaincinv
+
+        value = lower_bound + (upper_bound - lower_bound) * float(
+            betaincinv(float(spec["alpha"]), float(spec["beta"]), probability)
+        )
+    elif kind == "power_law":
+        # The exponent is on the density, so the inverse CDF integrates it: a
+        # shifted exponent of zero degenerates to log-uniform.
+        exponent = float(spec["exponent"]) + 1
+        span = upper_bound - lower_bound
+        if abs(exponent) < 1e-10:
+            value = lower_bound + probability * span
+        else:
+            value = lower_bound + math.log1p(probability * math.expm1(exponent * span)) / exponent
     elif kind == "normal":
-        normal = NormalDist(float(spec["mean"]), float(spec["std"]))
-        lower, upper = normal.cdf(lower_bound), normal.cdf(upper_bound)
-        if not lower < upper:
-            raise ValueError("Normal distribution has empty truncation interval.")
-        quantile = min(1.0 - 1e-15, max(1e-15, lower + probability * (upper - lower)))
-        value = normal.inv_cdf(quantile)
+        from scipy.stats import truncnorm
+
+        mean, std = float(spec["mean"]), float(spec["std"])
+        if std <= 0:
+            raise ValueError("Normal distribution needs std > 0, got %r." % std)
+        value = float(
+            truncnorm.ppf(
+                probability, (lower_bound - mean) / std, (upper_bound - mean) / std, loc=mean, scale=std
+            )
+        )
     elif kind == "histogram":
         edges = [float(edge) for edge in spec["edges"]]
         edges = [math.log(edge) for edge in edges] if logarithmic else edges
@@ -175,6 +223,117 @@ def fitted_quantile(spec: Mapping[str, Any], probability: float) -> float:
     return min(high, max(low, math.exp(value) if logarithmic else value))
 
 
+def resolve_model(model: Mapping[str, Any], leaves: Mapping[str, Any]) -> tuple[Mapping[str, Any], str | None]:
+    """A parameter's spec and the leaf path it came from, if it is a reference.
+
+    Inside a `parameters` or `joint` group a parameter is either an inline spec
+    or `{sample: dotted.path}` naming a top-level leaf, which is how the vocal
+    and generic compressor groups share one `attack_ms` prior
+    (distributions.yaml, vocals.compression.settings).
+    """
+    if isinstance(model, Mapping) and "sample" in model and "type" not in model:
+        path = str(model["sample"])
+        leaf = leaves.get(path)
+        if leaf is None:
+            raise ValueError("Parameter references unknown distribution '%s'." % path)
+        return leaf, path
+    return model, None
+
+
+def yields_mapping(spec: Mapping[str, Any]) -> bool:
+    """Whether a leaf resolves to a whole params mapping rather than one value.
+
+    A recipe attaches these with `sample:` at the params level, so the drawn
+    dict becomes the step's entire params map (motifs.yaml:91).
+    """
+    kind = str(spec.get("type", "choice"))
+    if kind in GROUP_KINDS:
+        return True
+    if kind in MIXTURE_KINDS:
+        return any(
+            yields_mapping(component["distribution"])
+            for component in spec.get("components", [])
+            if isinstance(component.get("distribution"), Mapping)
+        )
+    return False
+
+
+def mixture_components(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A mixture's components, each carrying a full nested spec.
+
+    A `gaussian_mixture` names only mean and std per component and keeps the
+    bounds and scale on the mixture, so each one is rewritten into the truncated
+    normal it stands for -- the same rewrite `_resolve_mixture_distribution`
+    does (planner.py:1494).
+    """
+    components = list(spec.get("components", []))
+    if not components:
+        raise ValueError("Mixture distribution requires at least one component.")
+    gaussian = str(spec["type"]) == "gaussian_mixture"
+    resolved = []
+    for index, component in enumerate(components):
+        nested = (
+            {
+                "type": "normal",
+                "low": spec["low"],
+                "high": spec["high"],
+                "scale": spec.get("scale", "linear"),
+                "mean": component["mean"],
+                "std": component["std"]
+            }
+            if gaussian
+            else component["distribution"]
+        )
+        resolved.append(
+            {
+                "index": index,
+                "weight": float(component.get("weight", 1.0)),
+                "label": str(component.get("label") or ""),
+                "spec": nested
+            }
+        )
+    return resolved
+
+
+def group_components(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Normalise any mapping-valued leaf to one flat list of components.
+
+    The configs spell this three ways -- `parameters` is a single group,
+    `joint` carries its parameter maps directly, and a `mixture` carries one
+    group per component under `distribution` -- and a caller should not have to
+    branch on which spelling a given prior happens to use.
+    """
+    kind = str(spec.get("type", ""))
+    if kind == "parameters":
+        return [{"index": 0, "weight": 1.0, "label": "", "parameters": dict(spec["parameters"])}]
+    if kind == "joint":
+        return [
+            {
+                "index": index,
+                "weight": float(component.get("weight", 1.0)),
+                "label": str(component.get("label") or ""),
+                "parameters": dict(component["parameters"])
+            }
+            for index, component in enumerate(spec["components"])
+        ]
+    if kind in MIXTURE_KINDS:
+        flattened: list[dict[str, Any]] = []
+        for component in mixture_components(spec):
+            if not yields_mapping(component["spec"]):
+                raise ValueError("Mixture component is a scalar distribution, not a parameter group.")
+            for nested in group_components(component["spec"]):
+                flattened.append(
+                    {
+                        "index": len(flattened),
+                        "weight": component["weight"] * nested["weight"],
+                        "label": component["label"] or nested["label"],
+                        "parameters": nested["parameters"]
+                    }
+                )
+        return flattened
+    raise ValueError("Distribution kind '%s' does not yield a parameter group." % kind)
+
+
 def leaf_bounds(spec: Mapping[str, Any]) -> tuple[float, float] | None:
     """Numeric support of a leaf, or None when it has no continuous range."""
     kind = str(spec.get("type", "choice"))
@@ -183,37 +342,79 @@ def leaf_bounds(spec: Mapping[str, Any]) -> tuple[float, float] | None:
         return (float(min(numeric)), float(max(numeric))) if numeric else None
     if kind in {"uniform", "int_uniform"} or kind in FITTED_KINDS:
         return float(spec["low"]), float(spec["high"])
+    if kind == "gaussian_mixture":
+        return float(spec["low"]), float(spec["high"])
+    if kind == "mixture":
+        spans = [leaf_bounds(component["spec"]) for component in mixture_components(spec)]
+        spans = [span for span in spans if span is not None]
+        if not spans:
+            return None
+        return min(span[0] for span in spans), max(span[1] for span in spans)
     return None
 
 
-def central_value(spec: Mapping[str, Any]) -> Any:
+def central_value(spec: Mapping[str, Any], leaves: Mapping[str, Any] | None = None) -> Any:
     """The value a control should open at: the distribution's middle.
 
-    Continuous kinds give their median, a choice gives its heaviest option, and
-    a joint gives its heaviest component's per-parameter medians.
+    A choice gives its heaviest option and every scalar kind gives its median,
+    mixtures included. A mapping-valued leaf gives one central value per
+    parameter of its heaviest group.
     """
     kind = str(spec.get("type", "choice"))
     if kind in CHOICE_KINDS:
         options = choice_options(spec)
         return max(options, key=lambda option: option["weight"])["value"]
-    if kind == "uniform":
-        return (float(spec["low"]) + float(spec["high"])) / 2.0
-    if kind == "int_uniform":
-        return int(round((float(spec["low"]) + float(spec["high"])) / 2.0))
-    if kind in FITTED_KINDS:
-        return fitted_quantile(spec, 0.5)
-    if kind == "joint":
-        component = _heaviest_component(spec)[1]
-        return {name: central_value(model) for name, model in component["parameters"].items()}
-    raise ValueError("Unsupported distribution type '%s'." % kind)
+    if yields_mapping(spec):
+        component = _heaviest(group_components(spec))
+        return {
+            name: central_value(resolve_model(model, leaves or {})[0], leaves)
+            for name, model in component["parameters"].items()
+        }
+    return distribution_quantiles(spec, (0.5,))[0]
 
 
-def _heaviest_component(spec: Mapping[str, Any]) -> tuple[int, Mapping[str, Any]]:
-    components = list(spec["components"])
-    if not components:
-        raise ValueError("Joint distribution requires at least one component.")
-    index = max(range(len(components)), key=lambda i: float(components[i].get("weight", 1.0)))
-    return index, components[index]
+def shape_note(spec: Mapping[str, Any]) -> str | None:
+    """A short plain reading of a fitted leaf's shape, or None.
+
+    The fitted parameters of a log-scaled prior are in log units, so a mean of
+    4.4 is really about 81 Hz. Saying so on the control saves the reader from
+    assuming the number is wrong.
+    """
+    kind = str(spec.get("type", ""))
+    logarithmic = spec.get("scale") == "log" or kind in ALWAYS_LOG_KINDS
+    if kind == "gaussian_mixture":
+        modes = [float(component["mean"]) for component in spec.get("components", [])]
+        shown = ", ".join(_fmt(math.exp(mode) if logarithmic else mode) for mode in sorted(modes))
+        return "%d-mode prior, peaking near %s" % (len(modes), shown)
+    if kind == "beta":
+        return "beta(%s, %s)%s" % (
+            _fmt(float(spec["alpha"])),
+            _fmt(float(spec["beta"])),
+            " over log spacing" if logarithmic else ""
+        )
+    if kind == "power_law":
+        return "power law, density proportional to x^%s" % _fmt(float(spec["exponent"]))
+    if kind == "normal":
+        # "centre", not "median": the fit is truncated to low/high, and where a
+        # bound bites the actual median moves off the fitted mean.
+        mean = float(spec["mean"])
+        return (
+            "log-normal, centred near %s (fitted mean %s in log units)" % (_fmt(math.exp(mean)), _fmt(mean))
+            if logarithmic
+            else "normal, centred on %s" % _fmt(mean)
+        )
+    if kind == "mixture":
+        return "%d-component mixture" % len(spec.get("components", []))
+    return None
+
+
+def _heaviest(items: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    if not items:
+        raise ValueError("Distribution requires at least one component.")
+    return max(items, key=lambda item: float(item.get("weight", 1.0)))
+
+
+
 
 
 def _is_number(value: Any) -> bool:
@@ -250,17 +451,90 @@ def _base_control(param_id: str, **extra: Any) -> dict[str, Any]:
     return control
 
 
+def is_logarithmic(spec: Mapping[str, Any]) -> bool:
+    """Whether a leaf's support is travelled in log space."""
+    return spec.get("scale") == "log" or str(spec.get("type", "")) in ALWAYS_LOG_KINDS
+
+
+def distribution_quantiles(spec: Mapping[str, Any], probabilities: Sequence[float]) -> list[float]:
+    """Values at the given probabilities for any scalar-valued leaf.
+
+    One entry point for every kind, so a caller asking "what does this prior
+    actually produce" never has to know which of the seven spellings it is.
+
+    A mixture has no closed-form quantile, so it is inverted numerically: each
+    component's own quantile function is evaluated across a fine probability
+    grid and the points are pooled by component weight. The grid is built once
+    per call, which is why this takes a list rather than one probability.
+    """
+    kind = str(spec.get("type", "choice"))
+    if kind in FITTED_KINDS:
+        return [fitted_quantile(spec, probability) for probability in probabilities]
+    if kind in {"uniform", "int_uniform"}:
+        low, high = float(spec["low"]), float(spec["high"])
+        values = [low + probability * (high - low) for probability in probabilities]
+        return [int(round(value)) for value in values] if kind == "int_uniform" else values
+    if kind in MIXTURE_KINDS:
+        return _mixture_quantiles(spec, probabilities)
+    raise ValueError("Distribution kind '%s' has no scalar quantiles." % kind)
+
+
+def _mixture_quantiles(spec: Mapping[str, Any], probabilities: Sequence[float]) -> list[float]:
+    grid = [(step + 0.5) / MIXTURE_GRID for step in range(MIXTURE_GRID)]
+    points: list[tuple[float, float]] = []
+    for component in mixture_components(spec):
+        share = component["weight"] / MIXTURE_GRID
+        points.extend((value, share) for value in distribution_quantiles(component["spec"], grid))
+    points.sort()
+    total = sum(weight for _, weight in points)
+    results = []
+    for probability in probabilities:
+        target = probability * total
+        seen = 0.0
+        chosen = points[-1][0]
+        for value, weight in points:
+            seen += weight
+            if seen >= target:
+                chosen = value
+                break
+        results.append(chosen)
+    return results
+
+
+def mass_interval(spec: Mapping[str, Any]) -> tuple[float, float] | None:
+    """Where a leaf's draws mostly land: its p10..p90 interval.
+
+    Several fitted priors declare a support far wider than the mass they carry --
+    the high-shelf `q` is fitted over 0.1..50 but 80% of its draws fall between
+    0.4 and 1.4 -- so the support alone says very little about the prior.
+    """
+    try:
+        low, high = distribution_quantiles(spec, (0.1, 0.9))
+    except ValueError:
+        return None
+    return float(low), float(high)
+
+
 def control_for_leaf(
     param_id: str,
-    path: str,
+    path: str | None,
     spec: Mapping[str, Any],
     *,
     origin: str = "sample"
 ) -> dict[str, Any]:
-    """Build the control for one distribution leaf.
+    """Build the control for one scalar distribution leaf.
 
-    A `choice` is discrete so it becomes a dropdown; everything with a
-    continuous support becomes a slider clamped to that support.
+    A continuous prior becomes a dropdown of its own deciles rather than a
+    slider. Every option is then an equally likely tenth of that prior, which
+    reports the shape a slider cannot show and sidesteps the question of whether
+    the track should be linear or logarithmic -- travelling a 20 Hz..20 kHz
+    support linearly leaves every plausible cutoff inside the first 2% of it.
+    The caller keeps a free numeric field alongside for deliberate overrides,
+    so the dropdown constrains without trapping.
+
+    A `choice` prior stays an index-keyed dropdown: its values are already
+    discrete, and `_choice_values` (planner.py:1594) places no constraint on
+    what a value is, so one can be a string or a list rather than a number.
     """
     kind = str(spec.get("type", "choice"))
     if kind in CHOICE_KINDS:
@@ -281,18 +555,47 @@ def control_for_leaf(
     if bounds is None:
         return _unresolved(param_id, "distribution '%s' has no numeric support" % kind, source=path)
     low, high = bounds
-    integer = kind == "int_uniform"
+
+    try:
+        deciles = distribution_quantiles(spec, DECILE_PROBABILITIES)
+    except ValueError as error:
+        return _unresolved(param_id, str(error), source=path)
+
+    options = []
+    for probability, value in zip(DECILE_PROBABILITIES, deciles):
+        value = min(high, max(low, value))
+        # A narrow or integer support can put two deciles on the same value;
+        # offering it twice would imply a choice that is not there.
+        if options and abs(options[-1]["value"] - value) <= abs(value) * 1e-12:
+            options[-1]["label"] += "-p%d" % round(probability * 100)
+            continue
+        options.append(
+            {
+                "index": len(options),
+                "value": value,
+                "weight": 0.1,
+                "label": "p%d" % round(probability * 100)
+            }
+        )
+    median_index = min(
+        range(len(options)), key=lambda index: abs(options[index]["value"] - deciles[len(deciles) // 2])
+    )
+    mass = mass_interval(spec)
     return _base_control(
         param_id,
-        kind="slider",
+        kind="quantile",
         source=path,
         dist_type=kind,
         origin=origin,
         min=low,
         max=high,
-        step=1 if integer else (high - low) / SLIDER_STEPS,
-        default=central_value(spec),
-        integer=integer
+        integer=kind == "int_uniform",
+        options=options,
+        default_index=median_index,
+        default=options[median_index]["value"],
+        mass_low=mass[0] if mass else None,
+        mass_high=mass[1] if mass else None,
+        note=shape_note(spec)
     )
 
 
@@ -329,10 +632,12 @@ def _fmt(value: float) -> str:
 def _pick(values: Mapping[str, Any], control: Mapping[str, Any]) -> Any:
     """Resolve one control to a value, preferring the caller's over the default.
 
-    A dropdown travels as an index into `options` because a choice value can be
-    a list (vocals.harmony.intervals holds interval sets), which does not
-    survive an HTML option value. Sliders clamp to the distribution's support --
-    offering only samplable values is the whole point of deriving bounds here.
+    A `choice` dropdown travels as an index into `options`, because nothing
+    constrains a choice value to be a number -- a string or a list would not
+    survive an HTML option value. A `quantile` control travels as the
+    number itself, since its free numeric field can carry a value that is not
+    one of the offered deciles; it is clamped to the prior's support, which is
+    the whole point of deriving that support here.
     """
     raw = values.get(control["id"])
     if control["kind"] == "dropdown":
@@ -497,46 +802,62 @@ def _resolve_ref(
     return resolve_param(param_id, spec, leaves, values, controls, bindings)
 
 
-def _resolve_joint(
+def _resolve_group(
     path: str,
     leaf: Mapping[str, Any],
+    leaves: Mapping[str, Any],
     values: Mapping[str, Any],
     controls: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Controls and kwargs for a joint distribution used as a whole params map.
+    """Controls and kwargs for a leaf that resolves to a whole params map.
 
-    A `joint` leaf is a mixture over *correlated* parameters, and recipes attach
-    it by putting `sample:` at the params level rather than under a param name
-    (motifs.yaml:85), so the drawn dict becomes the step's entire params map.
-    The component picker comes first; the parameters below it belong to whichever
-    component is selected, which is the only correlation the prior actually
-    captures -- within a component the planner draws independently
-    (planner.py:1593).
+    The configs spell these as `parameters` (one group), `joint`, or a `mixture`
+    of groups, and `group_components` flattens all three to the same list. A
+    group is a prior over *correlated* parameters, so when there is more than one
+    the picker comes first and the parameters below belong to whichever is
+    selected -- that grouping is the only correlation the prior actually
+    captures, since within a group the planner draws independently
+    (planner.py:1533).
+
+    A single-group prior gets no picker: there is nothing to choose.
     """
-    components = list(leaf["components"])
-    default_index = _heaviest_component(leaf)[0]
-    picker = _base_control(
-        COMPONENT_CONTROL_ID,
-        label="mixture component",
-        kind="dropdown",
-        source=path,
-        dist_type="joint",
-        origin="joint",
-        options=[
-            {"index": index, "value": index, "weight": float(component.get("weight", 1.0))}
-            for index, component in enumerate(components)
-        ],
-        default_index=default_index,
-        default=default_index,
-        note="%d correlated settings groups; the parameters below come from the selected one" % len(components)
-    )
-    picker["param"] = "component"
-    controls.append(picker)
+    components = group_components(leaf)
+    index = 0
+    if len(components) > 1:
+        default_index = components.index(_heaviest(components))
+        picker = _base_control(
+            COMPONENT_CONTROL_ID,
+            label="settings group",
+            kind="dropdown",
+            source=path,
+            dist_type=str(leaf.get("type")),
+            origin="group",
+            options=[
+                {
+                    "index": component["index"],
+                    "value": component["index"],
+                    "weight": component["weight"],
+                    "label": component["label"]
+                }
+                for component in components
+            ],
+            default_index=default_index,
+            default=default_index,
+            note="%d correlated groups; the parameters below come from the selected one" % len(components)
+        )
+        picker["param"] = "settings_group"
+        controls.append(picker)
+        index = int(_pick(values, picker))
 
-    index = int(_pick(values, picker))
     kwargs: dict[str, Any] = {}
     for name, model in components[index]["parameters"].items():
-        control = control_for_leaf(name, "%s.components[%d].%s" % (path, index, name), model, origin="joint")
+        spec, source = resolve_model(model, leaves)
+        control = control_for_leaf(
+            name,
+            source or "%s.%s" % (path, name),
+            spec,
+            origin="sample" if source else "group"
+        )
         controls.append(control)
         kwargs[name] = _pick(values, control)
     return kwargs
@@ -570,16 +891,21 @@ def effect_params(
     notes: list[str] = []
     spec = effect.get("params") or {}
 
+    # A `sample:` standing where a param name would go names a mapping-valued
+    # prior, so the drawn dict becomes the whole params map.
     if isinstance(spec, Mapping) and _special_key(spec) == "sample":
         path = str(spec["sample"])
         leaf = leaves.get(path)
         if leaf is None:
             notes.append("unknown distribution path '%s'; every param left at its default" % path)
             return {}, controls, notes
-        if str(leaf.get("type")) != "joint":
-            notes.append("'%s' is a %s, but it is attached as a whole params map" % (path, leaf.get("type")))
+        if not yields_mapping(leaf):
+            notes.append(
+                "'%s' is a %s, which resolves to one value, but it is attached as a whole params map"
+                % (path, leaf.get("type"))
+            )
             return {}, controls, notes
-        return _resolve_joint(path, leaf, values, controls), controls, notes
+        return _resolve_group(path, leaf, leaves, values, controls), controls, notes
 
     kwargs: dict[str, Any] = {}
     for param, value in spec.items():
@@ -764,16 +1090,29 @@ def _check_control(control: Mapping[str, Any], where: str) -> list[str]:
     """Problems with one control, as messages. Empty means it is usable."""
     problems: list[str] = []
     kind = control["kind"]
-    if kind == "slider":
+    if kind == "quantile":
         low, high, default = control["min"], control["max"], control["default"]
+        options = control["options"]
         if not low < high:
-            problems.append("%s: slider needs min < max, got %r..%r" % (where, low, high))
+            problems.append("%s: needs min < max, got %r..%r" % (where, low, high))
+        if not options:
+            problems.append("%s: no decile options" % where)
+        elif not 0 <= control["default_index"] < len(options):
+            problems.append("%s: default_index %r out of range" % (where, control["default_index"]))
+        for option in options:
+            if not _is_number(option["value"]):
+                problems.append("%s: non-numeric option %r" % (where, option["value"]))
+            elif not low - 1e-9 <= option["value"] <= high + 1e-9:
+                problems.append("%s: option %r outside support %r..%r" % (where, option["value"], low, high))
+        if [option["value"] for option in options] != sorted(option["value"] for option in options):
+            problems.append("%s: deciles are not ascending" % where)
         if not _is_number(default):
-            problems.append("%s: slider default is not a number: %r" % (where, default))
-        elif not low <= default <= high:
+            problems.append("%s: default is not a number: %r" % (where, default))
+        elif not low - 1e-9 <= default <= high + 1e-9:
             problems.append("%s: default %r outside support %r..%r" % (where, default, low, high))
-        if not control["step"] > 0:
-            problems.append("%s: slider step must be positive, got %r" % (where, control["step"]))
+        mass_low, mass_high = control.get("mass_low"), control.get("mass_high")
+        if mass_low is not None and not low - 1e-9 <= mass_low <= mass_high + 1e-9 <= high + 1e-9:
+            problems.append("%s: p10..p90 %r..%r outside support" % (where, mass_low, mass_high))
     elif kind == "dropdown":
         options = control["options"]
         if not options:
@@ -867,12 +1206,19 @@ def main() -> None:
 
 
 def _describe(control: Mapping[str, Any]) -> str:
-    if control["kind"] == "slider":
-        return "%s..%s default %s%s" % (
-            _fmt(control["min"]),
-            _fmt(control["max"]),
+    if control["kind"] == "quantile":
+        mass = (
+            ""
+            if control.get("mass_low") is None
+            else "  most %s..%s" % (_fmt(control["mass_low"]), _fmt(control["mass_high"]))
+        )
+        return "%d deciles %s..%s default %s%s%s" % (
+            len(control["options"]),
+            _fmt(control["options"][0]["value"]),
+            _fmt(control["options"][-1]["value"]),
             _fmt(control["default"]),
-            " %s" % control["units"] if control["units"] else ""
+            " %s" % control["units"] if control["units"] else "",
+            mass
         )
     if control["kind"] == "dropdown":
         return "%d options, default %r" % (len(control["options"]), control["default"])
