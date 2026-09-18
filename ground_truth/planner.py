@@ -1375,7 +1375,7 @@ class GroundTruthPlanner:
     ) -> list[Any]:
         values = list(self._lookup_path(context, spec[key]))
         values = self._filter_binding_values(values, spec)
-        return [rng.choice(values)] if mode == "sample" else values
+        return [rng.choice(values)] if mode == "sample" and values else values
 
     def _binding_explicit_values(
         self,
