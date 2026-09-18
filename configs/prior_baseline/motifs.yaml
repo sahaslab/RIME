@@ -1,0 +1,138 @@
+# Motifs are reusable bundles of steps
+# They can carry defaults like `order_profile` so recipes stay concise, but they can also be overridden or extended with additional steps when used in a recipe
+motifs:
+  # Canonical aux-space chain:
+  # delay -> reverb -> wet-path HPF -> wet-path LPF
+  band_limited_space_send_synced:
+    order_profile: send_space
+    steps:
+      - name: delay
+        operator: apply_delay_effect
+        params:
+          # If BPM is unavailable upstream, fall back to a neutral 120 BPM prior.
+          delay_seconds:
+            tempo_sync:
+              bpm:
+                coalesce:
+                  - ref: metadata.analysis.tempo_bpm
+                  - 120.0
+              beats:
+                sample: space.shared_send.delay.synced.beats
+          feedback:
+            sample: space.shared_send.feedback
+          mix: 1.0
+      - name: reverb
+        operator: apply_reverb_effect
+        params:
+          room_size:
+            sample: space.shared_send.reverb.room_size
+          damping:
+            sample: space.shared_send.reverb.damping
+          wet_level: 1.0
+          dry_level: 0.0
+          width: 1.0
+          freeze_mode: 0.0
+      - name: send_highpass
+        operator: apply_highpass_filter
+        params:
+          cutoff_frequency_hz:
+            sample: space.shared_send.post_eq.highpass_hz
+      - name: send_lowpass
+        operator: apply_lowpass_filter
+        params:
+          cutoff_frequency_hz:
+            sample: space.shared_send.post_eq.lowpass_hz
+  # Free-time space variant. Keep this available, but lower-priority than the
+  # synced version above.
+  band_limited_space_send_free:
+    order_profile: send_space
+    steps:
+      - name: delay
+        operator: apply_delay_effect
+        params:
+          delay_seconds:
+            sample: space.shared_send.delay.free.seconds
+          feedback:
+            sample: space.shared_send.feedback
+          mix: 1.0
+      - name: reverb
+        operator: apply_reverb_effect
+        params:
+          room_size:
+            sample: space.shared_send.reverb.room_size
+          damping:
+            sample: space.shared_send.reverb.damping
+          wet_level: 1.0
+          dry_level: 0.0
+          width: 1.0
+          freeze_mode: 0.0
+      - name: send_highpass
+        operator: apply_highpass_filter
+        params:
+          cutoff_frequency_hz:
+            sample: space.shared_send.post_eq.highpass_hz
+      - name: send_lowpass
+        operator: apply_lowpass_filter
+        params:
+          cutoff_frequency_hz:
+            sample: space.shared_send.post_eq.lowpass_hz
+  # Drum parallel compression bus. Wet level is controlled by the parent send/return block.
+  parallel_compression_bus:
+    order_profile: shaping
+    steps:
+      - name: compressor
+        operator: apply_compressor_effect
+        params:
+          threshold_db:
+            sample: drums.parallel_compression.threshold_db
+          ratio:
+            sample: drums.parallel_compression.ratio
+          attack_ms: 5.0
+          release_ms: 60.0
+  # Direct serial vocal compression for control rather than obvious effect.
+  vocal_control_compression:
+    order_profile: shaping
+    steps:
+      - name: vocal_control
+        operator: apply_compressor_effect
+        params:
+          threshold_db:
+            sample: vocals.compression.threshold_db
+          ratio:
+            sample: vocals.compression.ratio
+          attack_ms:
+            sample: vocals.compression.attack_ms
+          release_ms:
+            sample: vocals.compression.release_ms
+  # Vintage tilt approximation using operators we already have.
+  retro_tilt_eq:
+    order_profile: eq_cleanup
+    steps:
+      - name: vintage_shelf
+        operator: apply_highshelf_filter
+        params:
+          cutoff_frequency_hz:
+            sample: tone.retro.shelf_cut_hz
+          gain_db:
+            sample: tone.retro.shelf_gain_db
+          q: 0.7071067690849304
+      - name: vintage_lowpass
+        operator: apply_lowpass_filter
+        params:
+          cutoff_frequency_hz:
+            sample: tone.retro.lowpass_hz
+  # Movement / width texture. Extend with phaser or chorus-vs-phaser branching later.
+  modulation_texture:
+    order_profile: serial_fx
+    steps:
+      - name: texture
+        operator: apply_chorus_effect
+        params:
+          rate_hz:
+            sample: tone.modulation.chorus.rate_hz
+          depth:
+            sample: tone.modulation.chorus.depth
+          centre_delay_ms: 7.0
+          feedback: 0.0
+          mix:
+            sample: tone.modulation.chorus.mix
