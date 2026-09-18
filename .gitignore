@@ -17,3 +17,14 @@ scripts/*.sh
 scripts/*.sbatch
 *.claude
 .env
+.DS_Store
+.conda/
+.pytest_cache/
+generation_priors/
+derived/
+scripts/plan_audit/
+scripts/empirical/
+scripts/fits/
+!scripts/setup_reproduction.sh
+!requirements-priors.txt
+!data/ground_truth/musiccaps_analysis_manifest.jsonl

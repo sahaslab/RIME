@@ -39,6 +39,7 @@ def main():
     )
     parser.add_argument("--random-plans-per-clip", type=int, default=8, help="Additional constrained random plans per clip. Default: %(default)s")
     parser.add_argument("--disable-random-plans", action="store_true", help="Disable constrained random plan generation")
+    parser.add_argument("--sampling-mode", choices=["enumerate", "sample"], default="sample", help="How to generate plans. Default: %(default)s")
     parser.add_argument("--poison-only", action="store_true", help="Keep only plans that include a poison graph.")
     parser.add_argument("--limit", type=int, default=None, help="Optional clip limit for smoke tests or partial generation. Default: no limit")
     parser.add_argument("--min-stems", type=int, default=2, help="Optional minimum number of stems for a clip to be included. Default: %(default)s")
@@ -69,6 +70,7 @@ def main():
             config_dir=args.config_dir,
             max_variants_per_recipe=args.max_variants_per_recipe,
             variant_selection=args.variant_selection,
+            planner_mode=args.sampling_mode,
             random_plans_per_clip=0 if (args.disable_random_plans or args.poison_only) else args.random_plans_per_clip,
             seed=args.seed,
             poison_only=bool(args.poison_only),
@@ -87,12 +89,13 @@ def iter_rows(
     seed: int,
     poison_only: bool,
     num_workers: int,
-    chunksize: int
+    chunksize: int,
+    planner_mode: str
 ) -> Iterator[dict[str, Any]]:
     with multiprocessing.Pool(
         processes=num_workers,
         initializer=init_worker,
-        initargs=(config_dir, max_variants_per_recipe, variant_selection, random_plans_per_clip, seed, poison_only),
+        initargs=(config_dir, max_variants_per_recipe, variant_selection, random_plans_per_clip, seed, poison_only, planner_mode),
     ) as pool:
         for rows_batch in tqdm(pool.imap(build_rows, records, chunksize=chunksize), total=len(records), desc="Building rows"):
             yield from rows_batch
@@ -105,15 +108,16 @@ def init_worker(
     random_plans_per_clip: int,
     seed: int,
     poison_only: bool,
+    mode: str
 ) -> None:
-    global WORKER_PLANNER, WORKER_MAX_VARIANTS_PER_RECIPE, WORKER_VARIANT_SELECTION, WORKER_RANDOM_PLANS_PER_CLIP, WORKER_SEED, WORKER_POISON_ONLY
+    global WORKER_PLANNER, WORKER_MAX_VARIANTS_PER_RECIPE, WORKER_VARIANT_SELECTION, WORKER_RANDOM_PLANS_PER_CLIP, WORKER_SEED, WORKER_POISON_ONLY, WORKER_PLANNER_MODE
     WORKER_PLANNER = GroundTruthPlanner.from_directory(config_dir)
     WORKER_MAX_VARIANTS_PER_RECIPE = max_variants_per_recipe
     WORKER_VARIANT_SELECTION = variant_selection
     WORKER_RANDOM_PLANS_PER_CLIP = random_plans_per_clip
     WORKER_SEED = seed
     WORKER_POISON_ONLY = poison_only
-
+    WORKER_PLANNER_MODE = mode
 
 def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     if WORKER_PLANNER is None:
@@ -122,7 +126,7 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     plan_seed = stable_seed(record.get("clip_id"), record.get("audio_path"), WORKER_SEED)
     plans = WORKER_PLANNER.plan(
         metadata=record,
-        mode="enumerate",
+        mode=WORKER_PLANNER_MODE,
         max_variants_per_recipe=WORKER_MAX_VARIANTS_PER_RECIPE,
         variant_selection=WORKER_VARIANT_SELECTION,
         seed=plan_seed
@@ -149,6 +153,7 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
         row["genres"] = genres
         row["mood_themes"] = mood_themes
         row["issues"] = issues
+        row["analysis"] = analysis
         # Carried per plan so plan and prompt artifacts stay self-contained
         # after the analysis manifest is regenerated. None when the dataset
         # ships no captions.

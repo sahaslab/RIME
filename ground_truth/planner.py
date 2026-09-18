@@ -5,7 +5,6 @@ import random
 import itertools
 import yaml
 from pathlib import Path
-from statistics import NormalDist
 from dataclasses import field, dataclass
 from collections.abc import Mapping, Sequence
 from ground_truth.runtime import RuntimePlanCompiler
@@ -53,9 +52,14 @@ DISTRIBUTION_HANDLER_NAMES = {
     "uniform": "_resolve_uniform_distribution",
     "int_uniform": "_resolve_int_uniform_distribution",
     "joint": "_resolve_joint_distribution",
-	"normal": "_resolve_fitted_distribution",
-	"histogram": "_resolve_fitted_distribution",
-	"log_uniform": "_resolve_fitted_distribution"
+    "parameters": "_resolve_parameters_distribution",
+    "mixture": "_resolve_mixture_distribution",
+    "gaussian_mixture": "_resolve_mixture_distribution",
+    "normal": "_resolve_fitted_distribution",
+    "beta": "_resolve_fitted_distribution",
+    "power_law": "_resolve_fitted_distribution",
+    "histogram": "_resolve_fitted_distribution",
+    "log_uniform": "_resolve_fitted_distribution"
 }
 
 # Rule action handlers.
@@ -103,6 +107,7 @@ class ResolvedPlan:
     poison_graph_spec: list[dict[str, Any]] | None = None
     poison_tags: list[str] = field(default_factory=list)
     poison_issues: list[str] = field(default_factory=list)
+    binding_specs: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +123,7 @@ class ResolvedPlan:
             "poison_graph_spec": self.poison_graph_spec,
             "poison_tags": self.poison_tags,
             "poison_issues": self.poison_issues,
+            "binding_specs": self.binding_specs,
         }
 
 
@@ -238,6 +244,11 @@ class GroundTruthPlanner:
                     graph_spec=graph_spec,
                     recipe_tags=tags,
                     applied_policies=applied_policies,
+                    binding_specs={
+                        "target_description": {"ref": "bindings.target_candidate.stem"},
+                        "target_family": {"ref": "bindings.target_candidate.family"},
+                        "random_plan_kind": "random_chain",
+                    },
                 )
             )
         return plans
@@ -488,6 +499,7 @@ class GroundTruthPlanner:
                 recipe_id=plan.recipe_id,
                 weight=plan.weight,
                 bindings=copy.deepcopy(plan.bindings),
+                binding_specs=copy.deepcopy(plan.binding_specs),
                 graph_spec=copy.deepcopy(plan.graph_spec),
                 recipe_tags=list(plan.recipe_tags),
                 applied_policies=list(plan.applied_policies),
@@ -719,6 +731,15 @@ class GroundTruthPlanner:
             )
         elif topology == "send_return":
             self._validate_random_chain(send_steps, family, "send_return")
+            levels, level_specs = self._sample_random_parameters(
+                {
+                    "dry_level": 1.0,
+                    "send_level": {"values": [0.25, 0.4, 0.6]},
+                    "return_level": {"values": [0.45, 0.7, 0.9]},
+                },
+                "random.send_return",
+                rng,
+            )
             blocks.append(
                 {
                     "kind": "send_return",
@@ -726,15 +747,23 @@ class GroundTruthPlanner:
                     "order_profile": "send_texture",
                     "source": "target_stem",
                     "output": "processed_stem",
-                    "dry_level": 1.0,
-                    "send_level": rng.choice([0.25, 0.4, 0.6]),
-                    "return_level": rng.choice([0.45, 0.7, 0.9]),
+                    **levels,
+                    "parameter_specs": level_specs,
                     "steps": send_steps,
                 }
             )
         else:
             self._validate_random_chain(serial_steps, family, "serial")
             self._validate_random_chain(send_steps, family, "send_return")
+            levels, level_specs = self._sample_random_parameters(
+                {
+                    "dry_level": 1.0,
+                    "send_level": {"values": [0.2, 0.35, 0.5]},
+                    "return_level": {"values": [0.4, 0.65, 0.85]},
+                },
+                "random.serial_plus_send",
+                rng,
+            )
             blocks.append(
                 {
                     "kind": "chain",
@@ -752,9 +781,8 @@ class GroundTruthPlanner:
                     "order_profile": "send_texture",
                     "source": "serial_stem",
                     "output": "processed_stem",
-                    "dry_level": 1.0,
-                    "send_level": rng.choice([0.2, 0.35, 0.5]),
-                    "return_level": rng.choice([0.4, 0.65, 0.85]),
+                    **levels,
+                    "parameter_specs": level_specs,
                     "steps": send_steps,
                 }
             )
@@ -922,42 +950,122 @@ class GroundTruthPlanner:
         rng: random.Random,
         index: int,
     ) -> dict[str, Any]:
-        name = "%02d_%s" % (index, operator_name.replace("apply_", "").replace("_effect", ""))
-        if operator_name == "apply_peak_filter":
-            return self._peak_step(rng, name)
-        if operator_name == "apply_highshelf_filter":
-            step = self._retro_shelf_step(rng)
-            step["name"] = name
-            return step
-        if operator_name == "apply_lowshelf_filter":
-            return self._lowshelf_step(rng, name)
-        if operator_name == "apply_highpass_filter":
-            return self._eq_highpass_step(rng, name)
-        if operator_name == "apply_lowpass_filter":
-            return self._eq_lowpass_step(rng, name)
-        if operator_name == "apply_compressor_effect":
-            return self._compressor_step(target_candidate, rng, name)
-        if operator_name == "apply_limiter_effect":
-            return self._limiter_step(rng, name)
-        if operator_name == "apply_gain":
-            return self._gain_step(rng, name)
-        if operator_name == "apply_distortion_effect":
-            return self._distortion_step(rng, name)
-        if operator_name == "apply_chorus_effect":
-            step = self._chorus_step(rng)
-            step["name"] = name
-            return step
-        if operator_name == "apply_phaser_effect":
-            return self._phaser_step(rng, name)
+        family = str(target_candidate.get("family"))
+        compression = "drums.parallel_compression" if family == "drums" else "vocals.compression"
+        definitions = {
+            "apply_peak_filter": {
+                "cutoff_frequency_hz": {"values": [350.0, 800.0, 1800.0, 3200.0, 5200.0]},
+                "gain_db": {"values": [-6.0, -3.0, 3.0, 5.0]},
+                "q": {"values": [0.8, 1.5, 3.0]},
+            },
+            "apply_highshelf_filter": {
+                "cutoff_frequency_hz": {"sample": "tone.retro.shelf_cut_hz"},
+                "gain_db": {"sample": "tone.retro.shelf_gain_db"},
+                "q": 0.7071067690849304,
+            },
+            "apply_lowshelf_filter": {
+                "cutoff_frequency_hz": {"values": [90.0, 140.0, 220.0]},
+                "gain_db": {"values": [-5.0, -3.0, 3.0, 5.0]},
+                "q": 0.7071067690849304,
+            },
+            "apply_highpass_filter": {
+                "cutoff_frequency_hz": {"values": [80.0, 120.0, 180.0, 300.0]},
+            },
+            "apply_lowpass_filter": {
+                "cutoff_frequency_hz": {"values": [4500.0, 6500.0, 8500.0, 12000.0]},
+            },
+            "apply_compressor_effect": {
+                "threshold_db": {"sample": "%s.threshold_db" % compression},
+                "ratio": {"sample": "%s.ratio" % compression},
+                "attack_ms": {"sample": "vocals.compression.attack_ms"},
+                "release_ms": {"sample": "vocals.compression.release_ms"},
+            },
+            "apply_limiter_effect": {
+                "threshold_db": {"values": [-10.0, -6.0, -3.0]},
+                "release_ms": {"values": [60.0, 120.0, 220.0]},
+            },
+            "apply_gain": {
+                "gain_db": {"sample_choice": ["balance.target_gain.up_db", "balance.target_gain.down_db"]},
+            },
+            "apply_distortion_effect": {
+                "drive_db": {"values": [5.0, 8.0, 12.0, 16.0]},
+            },
+            "apply_chorus_effect": {
+                "rate_hz": {"sample": "tone.modulation.chorus.rate_hz"},
+                "depth": {"sample": "tone.modulation.chorus.depth"},
+                "centre_delay_ms": 7.0,
+                "feedback": 0.0,
+                "mix": {"sample": "tone.modulation.chorus.mix"},
+            },
+            "apply_phaser_effect": {
+                "rate_hz": {"values": [0.25, 0.5, 1.0]},
+                "depth": {"values": [0.35, 0.55, 0.75]},
+                "centre_frequency_hz": {"values": [650.0, 1300.0, 2200.0]},
+                "feedback": {"values": [0.0, 0.15, 0.3]},
+                "mix": {"values": [0.25, 0.4, 0.6]},
+            },
+            "apply_delay_effect": {
+                "delay_seconds": {"sample": "space.shared_send.delay.free.seconds"},
+                "feedback": {"sample": "space.shared_send.feedback"},
+                "mix": 0.45,
+            },
+            "apply_reverb_effect": {
+                "room_size": {"sample": "space.shared_send.reverb.room_size"},
+                "damping": {"sample": "space.shared_send.reverb.damping"},
+                "wet_level": 0.55,
+                "dry_level": 0.65,
+                "width": 1.0,
+                "freeze_mode": 0.0,
+            },
+        }
+        specs = definitions[operator_name]
         if operator_name == "apply_delay_effect":
-            step = self._delay_step(metadata, rng)
-            step["name"] = name
-            return step
-        if operator_name == "apply_reverb_effect":
-            step = self._reverb_step(rng)
-            step["name"] = name
-            return step
-        raise ValueError("Unsupported random operator '%s'." % operator_name)
+            bpm = metadata.get("analysis", {}).get("tempo_bpm")
+            if bpm is not None and rng.random() < 0.7:
+                specs["delay_seconds"] = {
+                    "tempo_sync": {
+                        "bpm": float(bpm),
+                        "beats": {"sample": "space.shared_send.delay.synced.beats"},
+                    },
+                }
+        params, provenance = self._sample_random_parameters(
+            specs,
+            "random.%s" % operator_name,
+            rng,
+        )
+        return {
+            "name": "%02d_%s" % (index, operator_name.replace("apply_", "").replace("_effect", "")),
+            "operator": operator_name,
+            "params": params,
+            "parameter_specs": provenance,
+        }
+
+    def _sample_random_parameters(
+        self,
+        specs: Mapping[str, Any],
+        namespace: str,
+        rng: random.Random,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        params, provenance = {}, {}
+        for parameter, spec in specs.items():
+            if isinstance(spec, Mapping) and "sample_choice" in spec:
+                # Preserve the existing draw order and record the chosen branch.
+                choices = [
+                    (reference, self._sample_distribution(reference, rng))
+                    for reference in spec["sample_choice"]
+                ]
+                reference, value = rng.choice(choices)
+                spec = {"sample": reference}
+            elif isinstance(spec, Mapping) and "values" in spec:
+                value = rng.choice(spec["values"])
+            else:
+                value = self._expand_value(spec, {}, "sample", rng)[0]
+            params[parameter] = value
+            provenance[parameter] = {
+                "name": "%s.%s" % (namespace, parameter),
+                "definition": copy.deepcopy(spec),
+            }
+        return params, provenance
 
     def _sort_random_steps_by_precedence(
         self,
@@ -1087,187 +1195,6 @@ class GroundTruthPlanner:
             "vocals": 4500.0,
         }.get(family, 4500.0)
 
-    def _compressor_step(
-        self,
-        target_candidate: Mapping[str, Any],
-        rng: random.Random,
-        name: str,
-    ) -> dict[str, Any]:
-        family = str(target_candidate.get("family"))
-        threshold_distribution = "drums.parallel_compression.threshold_db" if family == "drums" else "vocals.compression.threshold_db"
-        ratio_distribution = "drums.parallel_compression.ratio" if family == "drums" else "vocals.compression.ratio"
-        return {
-            "name": name,
-            "operator": "apply_compressor_effect",
-            "params": {
-                "threshold_db": self._sample_distribution(threshold_distribution, rng),
-                "ratio": self._sample_distribution(ratio_distribution, rng),
-                "attack_ms": self._sample_distribution("vocals.compression.attack_ms", rng),
-                "release_ms": self._sample_distribution("vocals.compression.release_ms", rng),
-            },
-        }
-
-    def _delay_step(
-        self,
-        metadata: Mapping[str, Any],
-        rng: random.Random,
-    ) -> dict[str, Any]:
-        return {
-            "name": "delay",
-            "operator": "apply_delay_effect",
-            "params": {
-                "delay_seconds": self._random_delay_seconds(metadata, rng),
-                "feedback": self._sample_distribution("space.shared_send.feedback", rng),
-                "mix": 0.45,
-            },
-        }
-
-    def _reverb_step(self, rng: random.Random) -> dict[str, Any]:
-        return {
-            "name": "reverb",
-            "operator": "apply_reverb_effect",
-            "params": {
-                "room_size": self._sample_distribution("space.shared_send.reverb.room_size", rng),
-                "damping": self._sample_distribution("space.shared_send.reverb.damping", rng),
-                "wet_level": 0.55,
-                "dry_level": 0.65,
-                "width": 1.0,
-                "freeze_mode": 0.0,
-            },
-        }
-
-    def _retro_shelf_step(self, rng: random.Random) -> dict[str, Any]:
-        return {
-            "name": "retro_shelf",
-            "operator": "apply_highshelf_filter",
-            "params": {
-                "cutoff_frequency_hz": self._sample_distribution("tone.retro.shelf_cut_hz", rng),
-                "gain_db": self._sample_distribution("tone.retro.shelf_gain_db", rng),
-                "q": 0.7071067690849304,
-            },
-        }
-
-    def _chorus_step(self, rng: random.Random) -> dict[str, Any]:
-        return {
-            "name": "chorus",
-            "operator": "apply_chorus_effect",
-            "params": {
-                "rate_hz": self._sample_distribution("tone.modulation.chorus.rate_hz", rng),
-                "depth": self._sample_distribution("tone.modulation.chorus.depth", rng),
-                "centre_delay_ms": 7.0,
-                "feedback": 0.0,
-                "mix": self._sample_distribution("tone.modulation.chorus.mix", rng),
-            },
-        }
-
-    def _gain_step(
-        self,
-        rng: random.Random,
-        name: str,
-        force_down: bool = False,
-    ) -> dict[str, Any]:
-        gain_db = (
-            self._sample_distribution("balance.target_gain.down_db", rng)
-            if force_down
-            else rng.choice(
-                [
-                    self._sample_distribution("balance.target_gain.up_db", rng),
-                    self._sample_distribution("balance.target_gain.down_db", rng),
-                ]
-            )
-        )
-        return {
-            "name": name,
-            "operator": "apply_gain",
-            "params": {
-                "gain_db": gain_db,
-            },
-        }
-
-    def _eq_highpass_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_highpass_filter",
-            "params": {
-                "cutoff_frequency_hz": rng.choice([80.0, 120.0, 180.0, 300.0]),
-            },
-        }
-
-    def _eq_lowpass_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_lowpass_filter",
-            "params": {
-                "cutoff_frequency_hz": rng.choice([4500.0, 6500.0, 8500.0, 12000.0]),
-            },
-        }
-
-    def _peak_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_peak_filter",
-            "params": {
-                "cutoff_frequency_hz": rng.choice([350.0, 800.0, 1800.0, 3200.0, 5200.0]),
-                "gain_db": rng.choice([-6.0, -3.0, 3.0, 5.0]),
-                "q": rng.choice([0.8, 1.5, 3.0]),
-            },
-        }
-
-    def _lowshelf_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_lowshelf_filter",
-            "params": {
-                "cutoff_frequency_hz": rng.choice([90.0, 140.0, 220.0]),
-                "gain_db": rng.choice([-5.0, -3.0, 3.0, 5.0]),
-                "q": 0.7071067690849304,
-            },
-        }
-
-    def _limiter_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_limiter_effect",
-            "params": {
-                "threshold_db": rng.choice([-10.0, -6.0, -3.0]),
-                "release_ms": rng.choice([60.0, 120.0, 220.0]),
-            },
-        }
-
-    def _distortion_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_distortion_effect",
-            "params": {
-                "drive_db": rng.choice([5.0, 8.0, 12.0, 16.0]),
-            },
-        }
-
-    def _phaser_step(self, rng: random.Random, name: str) -> dict[str, Any]:
-        return {
-            "name": name,
-            "operator": "apply_phaser_effect",
-            "params": {
-                "rate_hz": rng.choice([0.25, 0.5, 1.0]),
-                "depth": rng.choice([0.35, 0.55, 0.75]),
-                "centre_frequency_hz": rng.choice([650.0, 1300.0, 2200.0]),
-                "feedback": rng.choice([0.0, 0.15, 0.3]),
-                "mix": rng.choice([0.25, 0.4, 0.6]),
-            },
-        }
-
-    def _random_delay_seconds(
-        self,
-        metadata: Mapping[str, Any],
-        rng: random.Random,
-    ) -> float:
-        analysis = dict(metadata.get("analysis", {}))
-        bpm = analysis.get("tempo_bpm")
-        if bpm is not None and rng.random() < 0.7:
-            beats = float(self._sample_distribution("space.shared_send.delay.synced.beats", rng))
-            return (60.0 / float(bpm)) * beats
-        return float(self._sample_distribution("space.shared_send.delay.free.seconds", rng))
-
     def _sample_distribution(self, distribution_name: str, rng: random.Random) -> Any:
         return self._distribution_values(distribution_name, "sample", rng)[0]
 
@@ -1349,7 +1276,7 @@ class GroundTruthPlanner:
     ) -> list[Any]:
         values = list(self._lookup_path(context, spec[key]))
         values = self._filter_binding_values(values, spec)
-        return [rng.choice(values)] if mode == "sample" else values
+        return [rng.choice(values)] if mode == "sample" and values else values
 
     def _binding_explicit_values(
         self,
@@ -1544,6 +1471,37 @@ class GroundTruthPlanner:
             return [rng.choices(values, weights=weights, k=1)[0]]
         return values
 
+    def _resolve_parameters_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[dict[str, Any]]:
+        columns = {
+            name: self._distribution_values(model["sample"], mode, rng)
+            if "sample" in model
+            else getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
+            for name, model in spec["parameters"].items()
+        }
+        return [{name: values[index % len(values)] for name, values in columns.items()} for index in range(max(len(values) for values in columns.values()))]
+
+    def _resolve_mixture_distribution(
+        self,
+        spec: Mapping[str, Any],
+        mode: str,
+        rng: random.Random
+    ) -> list[Any]:
+        components = spec["components"]
+        if spec["type"] == "gaussian_mixture":
+            components = [{"weight": component["weight"], "distribution": {"type": "normal", "low": spec["low"], "high": spec["high"], "scale": spec.get("scale", "linear"), "mean": component["mean"], "std": component["std"]}} for component in components]
+        if mode == "sample":
+            components = rng.choices(components, weights=[component["weight"] for component in components], k=1)
+        values = []
+        for component in components:
+            model = component["distribution"]
+            values.extend(getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng))
+        return values
+
     def _resolve_uniform_distribution(
         self,
         spec: Mapping[str, Any],
@@ -1566,7 +1524,9 @@ class GroundTruthPlanner:
         settings = []
         for component in components:
             columns = {
-                name: getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
+                name: self._distribution_values(model["sample"], mode, rng)
+                if "sample" in model
+                else getattr(self, DISTRIBUTION_HANDLER_NAMES[model["type"]])(model, mode, rng)
                 for name, model in component["parameters"].items()
             }
             # Enumeration uses representative marginal quantiles per component;
@@ -1582,7 +1542,7 @@ class GroundTruthPlanner:
         rng: random.Random
     ) -> list[float]:
         kind = spec["type"]
-        logarithmic = spec.get("scale") == "log" or kind == "log_uniform"
+        logarithmic = spec.get("scale") == "log" or kind in {"log_uniform", "power_law"}
         low, high = float(spec["low"]), float(spec["high"])
         assert low < high and (not logarithmic or low > 0)
         a, b = (math.log(low), math.log(high)) if logarithmic else (low, high)
@@ -1591,12 +1551,16 @@ class GroundTruthPlanner:
         for probability in probabilities:
             if kind == "log_uniform":
                 value = a + probability * (b - a)
+            elif kind == "beta":
+                from scipy.special import betaincinv
+                value = a + (b - a) * float(betaincinv(spec["alpha"], spec["beta"], probability))
+            elif kind == "power_law":
+                exponent = float(spec["exponent"]) + 1
+                value = a + probability * (b - a) if abs(exponent) < 1e-10 else a + math.log1p(probability * math.expm1(exponent * (b - a))) / exponent
             elif kind == "normal":
-                normal = NormalDist(float(spec["mean"]), float(spec["std"]))
-                lower, upper = normal.cdf(a), normal.cdf(b)
-                assert lower < upper
-                quantile = min(1.0 - 1e-15, max(1e-15, lower + probability * (upper - lower)))
-                value = normal.inv_cdf(quantile)
+                from scipy.stats import truncnorm
+                mean, std = float(spec["mean"]), float(spec["std"])
+                value = float(truncnorm.ppf(probability, (a - mean) / std, (b - mean) / std, loc=mean, scale=std))
             else:
                 assert kind == "histogram"
                 edges = [float(edge) for edge in spec["edges"]]

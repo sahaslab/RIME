@@ -1,0 +1,135 @@
+# Global validation and prior-shaping rules.
+constraints:
+  chain_order:
+    # Default order for generic serial chains. Specific blocks can override with
+    # `order_profile`.
+    default_profile: shaping
+    profiles:
+      # For explicit EQ cleanup rules from the design document:
+      # peak -> shelf -> HPF/LPF
+      eq_cleanup:
+        tags:
+          eq_peak: 10
+          eq_shelf: 20
+          eq_pass: 30
+      # Broad serial signal path prior:
+      # EQ -> dynamics -> distortion -> modulation -> time-based
+      shaping:
+        tags:
+          eq_peak: 10
+          eq_shelf: 20
+          eq_pass: 30
+          dynamics: 40
+          distortion: 50
+          modulation: 60
+          time_based: 70
+          level: 80
+      serial_fx:
+        tags:
+          dynamics: 10
+          distortion: 20
+          modulation: 30
+          time_based: 40
+          level: 50
+      send_texture:
+        tags:
+          modulation: 10
+          time_based: 20
+          eq_pass: 30
+          level: 40
+      # Aux-space path: time-based first, then filter the wet return.
+      send_space:
+        tags:
+          time_based: 10
+          eq_pass: 20
+      # Harmony support path:
+      # pitch generation -> tuck -> filter -> optional FX
+      harmony_aux:
+        tags:
+          pitch: 10
+          level: 20
+          eq_pass: 30
+          modulation: 40
+          time_based: 50
+  pattern_policies:
+    # Hard rejections first.
+    - name: no_delay_on_drums
+      action: reject
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: drums
+          - contains_any:
+              path: pattern.tags
+              values:
+                - delay
+    - name: no_edits_on_other
+      action: reject
+      when:
+        eq:
+          path: bindings.target_family
+          value: other
+    # Soft weighting heuristics next.
+    - name: modulation_rare_on_drums
+      action: multiply
+      multiplier: 0.15
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: drums
+          - contains_any:
+              path: pattern.tags
+              values:
+                - modulation
+    - name: modulation_rare_on_vocals
+      action: multiply
+      multiplier: 0.35
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: vocals
+          - contains_any:
+              path: pattern.tags
+              values:
+                - modulation
+    - name: parallel_compression_preferred_on_drums
+      action: multiply
+      multiplier: 1.35
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: drums
+          - contains_any:
+              path: pattern.tags
+              values:
+                - compression
+                - send_return
+    - name: compression_common_on_vocals
+      action: multiply
+      multiplier: 1.2
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: vocals
+          - contains_any:
+              path: pattern.tags
+              values:
+                - compression
+    - name: space_usually_good_on_vocals
+      action: multiply
+      multiplier: 1.1
+      when:
+        all:
+          - eq:
+              path: bindings.target_family
+              value: vocals
+          - contains_any:
+              path: pattern.tags
+              values:
+                - reverb
+                - delay

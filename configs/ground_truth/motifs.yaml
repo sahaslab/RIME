@@ -116,8 +116,7 @@ motifs:
           sample: tone.modulation.chorus.rate_hz
         depth:
           sample: tone.modulation.chorus.depth
-        centre_delay_ms:
-          sample: tone.modulation.chorus.centre_delay_ms
+        centre_delay_ms: 7.0
         feedback: 0.0
         mix:
           sample: tone.modulation.chorus.mix
