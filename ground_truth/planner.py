@@ -982,12 +982,12 @@ class GroundTruthPlanner:
             "apply_highshelf_filter": {
                 "cutoff_frequency_hz": {"sample": "tone.retro.shelf_cut_hz"},
                 "gain_db": {"sample": "tone.retro.shelf_gain_db"},
-                "q": 0.7071067690849304,
+                "q": {"sample": "tone.equalization.shelf_q"},
             },
             "apply_lowshelf_filter": {
                 "cutoff_frequency_hz": {"values": [90.0, 140.0, 220.0]},
                 "gain_db": {"values": [-5.0, -3.0, 3.0, 5.0]},
-                "q": 0.7071067690849304,
+                "q": {"sample": "tone.equalization.shelf_q"},
             },
             "apply_highpass_filter": {
                 "cutoff_frequency_hz": {"values": [80.0, 120.0, 180.0, 300.0]},
@@ -998,12 +998,12 @@ class GroundTruthPlanner:
             "apply_compressor_effect": {
                 "threshold_db": {"sample": "%s.threshold_db" % compression},
                 "ratio": {"sample": "%s.ratio" % compression},
-                "attack_ms": {"sample": "vocals.compression.attack_ms"},
-                "release_ms": {"sample": "vocals.compression.release_ms"},
+                "attack_ms": {"sample": "%s.attack_ms" % compression},
+                "release_ms": {"sample": "%s.release_ms" % compression},
             },
             "apply_limiter_effect": {
-                "threshold_db": {"values": [-10.0, -6.0, -3.0]},
-                "release_ms": {"values": [60.0, 120.0, 220.0]},
+                "threshold_db": {"sample": "dynamics.limiter.threshold_db"},
+                "release_ms": {"sample": "dynamics.limiter.release_ms"},
             },
             "apply_gain": {
                 "gain_db": {"sample_choice": ["balance.target_gain.up_db", "balance.target_gain.down_db"]},
@@ -1014,8 +1014,8 @@ class GroundTruthPlanner:
             "apply_chorus_effect": {
                 "rate_hz": {"sample": "tone.modulation.chorus.rate_hz"},
                 "depth": {"sample": "tone.modulation.chorus.depth"},
-                "centre_delay_ms": 7.0,
-                "feedback": 0.0,
+                "centre_delay_ms": {"sample": "tone.modulation.chorus.centre_delay_ms"},
+                "feedback": {"sample": "tone.modulation.chorus.feedback"},
                 "mix": {"sample": "tone.modulation.chorus.mix"},
             },
             "apply_phaser_effect": {
@@ -1028,14 +1028,14 @@ class GroundTruthPlanner:
             "apply_delay_effect": {
                 "delay_seconds": {"sample": "space.shared_send.delay.free.seconds"},
                 "feedback": {"sample": "space.shared_send.feedback"},
-                "mix": 0.45,
+                "mix": {"sample": "space.shared_send.delay.mix"},
             },
             "apply_reverb_effect": {
                 "room_size": {"sample": "space.shared_send.reverb.room_size"},
                 "damping": {"sample": "space.shared_send.reverb.damping"},
-                "wet_level": 0.55,
-                "dry_level": 0.65,
-                "width": 1.0,
+                "wet_level": {"sample": "space.shared_send.reverb.wet_level"},
+                "dry_level": {"sample": "space.shared_send.reverb.dry_level"},
+                "width": {"sample": "space.shared_send.reverb.width"},
                 "freeze_mode": 0.0,
             },
         }
