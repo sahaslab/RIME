@@ -202,7 +202,7 @@ def test_selector_fills_budget_without_discarding_bins() -> None:
         for index in range(8)
     ]
     args = argparse.Namespace(
-        seed=7, limit=4, max_per_source_recipe=1, policy="prior_coverage", max_random_fraction=0.15
+        seed=7, limit=4, max_per_source_recipe=1, policy="prior_coverage", max_random_fraction=0.15, max_poison_fraction=0.0
     )
     selected, _ = select_candidates(candidates, features, args)
     assert len(selected) == 4
@@ -231,6 +231,7 @@ def test_random_fraction_cap_and_shortfall() -> None:
                     max_per_source_recipe=1,
                     policy=policy,
                     max_random_fraction=fraction,
+                    max_poison_fraction=0.0,
                 )
                 selected, _ = select_candidates(candidates, features, args)
                 random_count = sum(candidates[index]["recipe_id"] == "random_constrained" for index in selected)
@@ -239,3 +240,33 @@ def test_random_fraction_cap_and_shortfall() -> None:
                     assert len(selected) == 20
                 if authored == 0 and fraction < 1.0:
                     assert not selected
+
+
+def test_poison_fraction_with_random_cap_and_shortfall() -> None:
+    for policy in ["random", "prior_coverage"]:
+        for poison_fraction in [0.0, 0.2, 1.0]:
+            for clean_count in [0, 3, 30]:
+                candidates = [
+                    {
+                        "clip_id": str(index),
+                        "recipe_id": "random_constrained" if index % 2 else "authored",
+                        "poisoned": index >= clean_count,
+                    }
+                    for index in range(clean_count + 40)
+                ]
+                features = [{("recipe", row["recipe_id"])} for row in candidates]
+                args = argparse.Namespace(
+                    seed=7,
+                    limit=20,
+                    max_per_source_recipe=1,
+                    policy=policy,
+                    max_random_fraction=0.15,
+                    max_poison_fraction=poison_fraction,
+                )
+                selected, _ = select_candidates(candidates, features, args)
+                assert sum(candidates[index]["poisoned"] for index in selected) <= len(selected) * poison_fraction
+                assert sum(candidates[index]["recipe_id"] == "random_constrained" for index in selected) <= len(selected) * 0.15
+                if clean_count == 0 and poison_fraction < 1.0:
+                    assert not selected
+                if poison_fraction == 1.0:
+                    assert len(selected) == 20
