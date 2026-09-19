@@ -32,6 +32,12 @@
 #   samples yet; the loader skips grounding checks for it
 version: 1
 
+# Decimal places for displaying a value when a parameter declares no `precision`
+# of its own. Display only: the graph and the rendered audio keep the sampled
+# value, but a prompt quoting 55.63485084437943 Hz is not an instruction anybody
+# would give, so prompts round.
+default_precision: 2
+
 shared_bands:
   # Spectral regions spanning every cutoff value reachable from
   # distributions.yaml, from 18 Hz rumble poisons up to 8.5 kHz air shelves.
@@ -66,14 +72,16 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: normalized
+      precision: 2
       weight: 1.0
       sample_refs: [space.shared_send.reverb.room_size]
       bands:
-        - upper: 0.375
+        # Quartiles of the uniform prior; the old edges gave 18/36/32/14.
+        - upper: 0.425
           suggested_terms: [tight, small, intimate]
-        - upper: 0.625
+        - upper: 0.6
           suggested_terms: [medium-sized, moderate, room-sized]
-        - upper: 0.85
+        - upper: 0.775
           # `distant` is SocialFX T1 reverb-tending.
           suggested_terms: [large, spacious, hall-like, distant]
         - upper: 0.96
@@ -83,6 +91,7 @@ param_bands:
       role: character
       direction: ascending
       unit: normalized
+      precision: 2
       sample_refs: [space.shared_send.reverb.damping]
       hint: Low damping rings out bright; high damping soaks up the top end.
       bands:
@@ -101,9 +110,33 @@ param_bands:
     dry_level:
       role: ignore
       note: Always 0.0 on the wet path.
+    # No longer pinned: every reverb motif now samples this over 0.5-1.0, so a
+    # reverb's stereo image varies audibly across half its range. Left as
+    # `role: ignore` it would be invisible to every abstraction level -- the
+    # same instruction text would map to renders that differ in width, which is
+    # unstated variance rather than a choice.
+    #
+    # `character` rather than `magnitude`, alongside `damping`: a wider image is
+    # a different reverb, not more of one, so it should not pull the chain
+    # intensity aggregate.
+    #
+    # Edges split the sampled range in three. `uniform` offers only `low` and
+    # `high` as landmarks, so these are even thirds rather than cuts against
+    # declared samples; revisit if a fitted prior replaces this one.
     width:
-      role: ignore
-      note: Pinned to 1.0 by every motif.
+      role: character
+      direction: ascending
+      unit: normalized
+      precision: 2
+      sample_refs: [space.shared_send.reverb.width]
+      hint: How wide the reverb's stereo image is; at the low end it stays near the centre.
+      bands:
+        - upper: 0.67
+          suggested_terms: [narrow, centred, focused]
+        - upper: 0.84
+          suggested_terms: [moderately wide, open]
+        - upper: 1.01
+          suggested_terms: [wide, full-width, spread right across the stereo field]
     freeze_mode:
       role: ignore
       note: Pinned to 0.0 by every motif.
@@ -113,6 +146,7 @@ param_bands:
       role: character
       direction: ascending
       unit: seconds
+      precision: 3
       # The synced motif derives this from beats x tempo rather than sampling it
       # directly, so the top band is deliberately wider than the free-time
       # support: 1.5 beats at 60 BPM reaches 1.5 s.
@@ -134,14 +168,17 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: normalized
+      precision: 2
       weight: 0.75
       sample_refs: [space.shared_send.feedback]
+      # Quartiles of the uniform prior. The old edges put only 11% of the
+      # corpus in the top band and 39% in the second.
       bands:
-        - upper: 0.09
+        - upper: 0.112
           suggested_terms: [a single repeat, no tail]
-        - upper: 0.265
+        - upper: 0.225
           suggested_terms: [a couple of repeats, short tail]
-        - upper: 0.4
+        - upper: 0.338
           suggested_terms: [several repeats, echoing]
         - upper: 0.46
           suggested_terms: [many repeats, regenerating, washed-out tail]
@@ -154,6 +191,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 2
       sample_refs: [tone.modulation.chorus.rate_hz]
       # The prior tops out at 0.9 Hz, so there is deliberately no "fast" band.
       bands:
@@ -167,6 +205,7 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: normalized
+      precision: 2
       weight: 1.0
       sample_refs: [tone.modulation.chorus.depth]
       bands:
@@ -189,6 +228,7 @@ param_bands:
       role: character
       direction: ascending
       unit: normalized
+      precision: 2
       sample_refs: [tone.modulation.chorus.mix]
       bands:
         - upper: 0.325
@@ -211,6 +251,7 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: db
+      precision: 1
       weight: 2.0
       sample_refs: [drums.distortion.drive_db]
       bands:
@@ -226,6 +267,7 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: ratio
+      precision: 1
       weight: 1.0
       # `*.compression.settings` are `parameters` nodes: one draw supplies
       # ratio, threshold, attack and release together, so the whole params block
@@ -254,6 +296,7 @@ param_bands:
       role: magnitude
       direction: descending
       unit: db
+      precision: 1
       weight: 0.5
       sample_refs:
         - dynamics.compression.settings
@@ -273,10 +316,15 @@ param_bands:
       role: character
       direction: ascending
       unit: ms
-      sample_refs: [dynamics.compression.settings, vocals.compression.settings]
+      precision: 1
+      sample_refs:
+        - dynamics.compression.settings
+        - vocals.compression.settings
+        - drums.parallel_compression.attack_ms
       bands:
-        # sqrt(5 * 10): the geometric mean splits a log_uniform evenly.
-        - upper: 7.07
+        # The drum bus prior reaches down to 2 ms where the vocal ones start at
+        # 5, so the even split over the union sits at 6.5 rather than sqrt(5*10).
+        - upper: 6.5
           suggested_terms: [fast attack, grabbing transients]
         - upper: 20.01
           suggested_terms: [moderate attack, letting transients through]
@@ -284,14 +332,52 @@ param_bands:
       role: character
       direction: ascending
       unit: ms
-      sample_refs: [dynamics.compression.settings, vocals.compression.settings]
+      precision: 0
+      sample_refs:
+        - dynamics.compression.settings
+        - vocals.compression.settings
+        - drums.parallel_compression.release_ms
       bands:
-        # sqrt(40 * 80). The old 65 was an arithmetic midpoint and put 70% of
-        # the corpus in this band.
-        - upper: 56.6
+        # The drum bus prior runs to 100 ms rather than 80, moving the even
+        # split from 56.6 up to 58.3.
+        - upper: 58.3
           suggested_terms: [quick release, lively, pumping]
         - upper: 200.01
           suggested_terms: [slow release, smooth, unobtrusive]
+
+  # The limiter had no entry here until `dynamics.limiter.*` gave it fitted
+  # priors; before that nothing but a random plan could reach it.
+  apply_limiter_effect:
+    # A limiter's threshold is its whole intensity story: the lower the ceiling
+    # sits, the more of the signal is held down. Descending, like the
+    # compressor's threshold.
+    threshold_db:
+      role: magnitude
+      direction: descending
+      unit: db
+      precision: 1
+      weight: 0.5
+      sample_refs: [dynamics.limiter.threshold_db]
+      hint: A lower ceiling means more of the signal is being held down.
+      bands:
+        - upper: -10.0
+          suggested_terms: [clamped hard, well into the signal]
+        - upper: -8.0
+          suggested_terms: [holding down the louder peaks]
+        - upper: 0.01
+          suggested_terms: [just shaving the peaks]
+    release_ms:
+      role: character
+      direction: ascending
+      unit: ms
+      precision: 0
+      sample_refs: [dynamics.limiter.release_ms]
+      bands:
+        # sqrt(60 * 150), the even split of a log_uniform.
+        - upper: 94.9
+          suggested_terms: [quick release, letting go fast]
+        - upper: 200.01
+          suggested_terms: [slow release, holding the level down]
 
   apply_gain:
     # Gain serves two unrelated jobs, and the same dB figure means different
@@ -302,6 +388,7 @@ param_bands:
       role: magnitude
       direction: absolute
       unit: db
+      precision: 1
       weight: 1.0
       sample_refs:
         - balance.target_gain.up_db
@@ -332,6 +419,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       hint: Everything below this region is removed.
       sample_refs:
@@ -346,6 +434,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       hint: Everything above this region is removed.
       sample_refs:
@@ -359,6 +448,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       hint: The shelf tilts everything above this region.
       sample_refs:
@@ -372,6 +462,7 @@ param_bands:
       role: magnitude
       direction: absolute
       unit: db
+      precision: 1
       weight: 0.75
       hint: Sign says lift or cut; the band describes how far.
       sample_refs:
@@ -397,6 +488,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       hint: The shelf tilts everything below this region.
       sample_refs: [tone.equalization.lowshelf.settings]
@@ -408,6 +500,7 @@ param_bands:
       role: magnitude
       direction: absolute
       unit: db
+      precision: 1
       weight: 0.75
       hint: Sign says lift or cut; the band describes how far.
       sample_refs: [tone.equalization.lowshelf.settings]
@@ -428,6 +521,7 @@ param_bands:
       role: character
       direction: ascending
       unit: q
+      precision: 2
       sample_refs: [tone.equalization.lowshelf.settings]
       bands:
         - upper: 0.83
@@ -442,6 +536,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       hint: The bell is centred on this region.
       sample_refs: [cleanup.vocal_sibilance.cut_hz]
@@ -449,6 +544,7 @@ param_bands:
       role: magnitude
       direction: absolute
       unit: db
+      precision: 1
       weight: 0.75
       sample_refs: [cleanup.vocal_sibilance.cut_db]
       bands:
@@ -460,6 +556,7 @@ param_bands:
       role: character
       direction: ascending
       unit: q
+      precision: 2
       sample_refs: [cleanup.vocal_sibilance.q]
       bands:
         # sqrt(2.5 * 4).
@@ -473,6 +570,7 @@ param_bands:
       role: character
       direction: absolute
       unit: semitones
+      precision: 0
       sample_refs: [vocals.harmony.intervals]
       hint: Sign says above or below the lead.
       bands:
@@ -494,6 +592,7 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: db
+      precision: 1
       weight: 1.5
       sample_refs: [poison.noise.hum_level_db]
       bands:
@@ -505,6 +604,7 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 2
       sample_refs: [poison.noise.hum_modulation_hz]
       bands:
         # sqrt(0.2 * 0.35).
@@ -521,6 +621,7 @@ param_bands:
       role: magnitude
       direction: ascending
       unit: db
+      precision: 1
       weight: 1.5
       sample_refs: [poison.noise.rumble_level_db]
       bands:
@@ -532,18 +633,21 @@ param_bands:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       sample_refs: [poison.noise.rumble_highpass_hz]
     lowpass_hz:
       role: character
       direction: ascending
       unit: hz
+      precision: 0
       bands_ref: shared.frequency_regions
       sample_refs: [poison.noise.rumble_lowpass_hz]
     modulation_hz:
       role: character
       direction: ascending
       unit: hz
+      precision: 2
       sample_refs: [poison.noise.rumble_modulation_hz]
       bands:
         # sqrt(0.2 * 0.35).
@@ -561,6 +665,7 @@ block_bands:
       role: magnitude
       direction: ascending
       unit: normalized
+      precision: 2
       weight: 1.0
       sample_refs:
         - space.shared_send.send_level
@@ -580,6 +685,7 @@ block_bands:
       role: magnitude
       direction: ascending
       unit: normalized
+      precision: 2
       weight: 2.0
       sample_refs:
         - space.shared_send.return_level
@@ -680,6 +786,22 @@ context_overlays:
 # being the opening of a longer unrelated word: that is what still rules out
 # `comp` ("complex") and `limit` ("band-limited").
 operator_names:
+  # `apply_gain` was by far the largest source of AL1 mention failures -- 828 of
+  # them over 1000 rows -- and the failing text was usually describing a gain
+  # move perfectly well. "...crush the bass stem with warm grit and bring it
+  # back up to match" names the gain; it just does not use any of the phrasings
+  # listed below.
+  #
+  # The docstring on `mentions` already warns why: a separated object slips
+  # through, so "turn the drums up" matches neither `turn up` nor `turn it up`.
+  # The fix for the common cases is to list the phrasings that actually occur;
+  # the general case cannot be enumerated.
+  #
+  # `bring back up` and `bring up` are added as the two most frequent, plus the
+  # level-matching idioms that mean the same thing on a parallel return. Kept
+  # out: bare `up` and `back`, which appear in far too much unrelated prose, and
+  # `boost`/`trim`, which the shelf and peak filters earn equally through their
+  # own gain_db.
   apply_gain:
     - volume
     - louder
@@ -688,6 +810,16 @@ operator_names:
     - turn it up
     - turn down
     - turn it down
+    - bring up
+    - bring it up
+    - bring back up
+    - bring it back up
+    - bring down
+    - bring it down
+    - level with
+    - match the level
+    - back up to match
+    - up to match
   # DAFx-17 Table 2 measures crunch at distortion 14/15, g=0.78 and fuzz at
   # 11/11, g=0.64 -- the two most distortion-specific descriptors it reports.
   apply_distortion_effect:

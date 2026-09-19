@@ -48,7 +48,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ground_truth.io_utils import load_records  # noqa: E402
-from ground_truth.rejection import MertSimilarityConfig, load_rejection_config  # noqa: E402
+from ground_truth.rejection import MertSimilarityConfig, normalize_row, load_rejection_config  # noqa: E402
 
 DEFAULT_CONFIG_DIR = Path("configs/ground_truth")
 
@@ -73,6 +73,17 @@ RESAMPLE_KWARGS = {
 # carry `skipped_existing` for 998 of 1000 rows whose audio is present and
 # valid. Whitelisting `rendered` silently discarded that entire artifact.
 FAILED_STATUS = "error"
+
+# Quartile labels for the similarity percentile, ascending by similarity.
+# Named for what the number means rather than Q1..Q4: a HIGH similarity is a
+# SMALL change, so the top quartile is the one at risk of being inaudible --
+# which is the whole reason this criterion exists.
+PERCENTILE_BUCKETS = (
+    (25.0, "most_audible"),
+    (50.0, "audible"),
+    (75.0, "subtle"),
+    (100.01, "least_audible")
+)
 
 REASON_NOT_RENDERED = "not_rendered"
 REASON_RENDER_ERROR = "render_error"
@@ -146,6 +157,67 @@ def iter_pairs(manifest_rows: Sequence[Mapping[str, Any]], reference_mode: str) 
     for row in manifest_rows:
         pair, reason = resolve_pair(row, reference_mode)
         yield row, pair, reason
+
+
+def iter_agent_pairs(
+    rows: Sequence[Mapping[str, Any]],
+    reference_mode: str,
+    baseline_index: Mapping[tuple[str, str], str] | None = None
+) -> Iterator[tuple[Mapping[str, Any], "SimilarityPair | None", str | None]]:
+    """Pairs taken straight from agent-input rows.
+
+    Agent input already carries both sides, so no render manifest is needed.
+    One is still accepted: it is the only place the no-FX baseline lives, and
+    that reference isolates the effects chain where agent input's `input_audio`
+    conflates it with Demucs separation loss.
+    """
+    for row in rows:
+        prompt_row, audio = normalize_row(row)
+        identity = {
+            "clip_id": prompt_row.get("clip_id"),
+            "plan_id": prompt_row.get("plan_id"),
+            "status": "agent_input"
+        }
+        if audio is None:
+            yield identity, None, REASON_NOT_RENDERED
+            continue
+
+        key = (str(identity["clip_id"]), str(identity["plan_id"]))
+        reference_path, reference_kind = audio.reference_path, audio.reference
+        # A manifest baseline beats agent input's source reference, except on a
+        # poison row where the baseline IS the degraded input.
+        if baseline_index and reference_mode != "source_only" and not audio.poison_repair:
+            baseline = baseline_index.get(key)
+            if baseline and Path(baseline).exists():
+                reference_path, reference_kind = baseline, "baseline"
+        if reference_mode == "baseline_only" and reference_kind != "baseline":
+            yield identity, None, REASON_NO_REFERENCE
+            continue
+
+        if not Path(reference_path).exists() or not Path(audio.edited_path).exists():
+            yield identity, None, REASON_MISSING_FILE
+            continue
+        yield identity, SimilarityPair(
+            clip_id=key[0],
+            plan_id=key[1],
+            reference_path=Path(reference_path),
+            edited_path=Path(audio.edited_path),
+            reference=reference_kind,
+            poison_repair=audio.poison_repair
+        ), None
+
+
+def baseline_index_from_manifest(manifest_rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], str]:
+    """`(clip_id, plan_id)` -> no-FX baseline path, for upgrading the reference."""
+    index: dict[tuple[str, str], str] = {}
+    for row in manifest_rows:
+        if row.get("status") == FAILED_STATUS or not row.get("baseline_path"):
+            continue
+        # A poison row's baseline is the degraded input, not a clean reference.
+        if row.get("poison_graph_spec"):
+            continue
+        index[(str(row.get("clip_id")), str(row.get("plan_id")))] = str(row["baseline_path"])
+    return index
 
 
 def embedding_cache_path(cache_dir: Path, audio_path: Path, model_key: str) -> Path:
@@ -361,6 +433,75 @@ def similarity_row(
     return row
 
 
+def percentile_of(sorted_values: Any, value: float) -> float:
+    """Where one value sits in the population, 0-100.
+
+    Percent of the population strictly below, plus half of what ties it. That
+    midpoint convention is what keeps a run of identical values centred on one
+    percentile instead of all landing at the bottom or the top of their run.
+    """
+    import numpy as np
+
+    below = int(np.searchsorted(sorted_values, value, side="left"))
+    at_or_below = int(np.searchsorted(sorted_values, value, side="right"))
+    ties = at_or_below - below
+    return 100.0 * (below + 0.5 * ties) / len(sorted_values)
+
+
+def bucket_for(percentile: float) -> str:
+    for upper, name in PERCENTILE_BUCKETS:
+        if percentile < upper:
+            return name
+    return PERCENTILE_BUCKETS[-1][1]
+
+
+def label_percentiles(path: Path) -> dict[str, int]:
+    """Add a global percentile and bucket to every scored row in a file.
+
+    A second pass on purpose. A percentile is a statement about the whole
+    population, so it cannot be computed while scoring is still adding to that
+    population -- and a `--resume` that appends new rows makes every existing
+    label stale. Each row therefore records `percentile_n`, the population it
+    was ranked against, so a consumer can tell a fresh label from a stale one
+    rather than trusting it blindly.
+
+    Rows with no similarity are left with a null percentile. They are not part
+    of the population either: ranking against unscored rows would make the
+    percentile depend on how much of the corpus had been rendered.
+    """
+    import numpy as np
+
+    rows = [row for row in load_records(path)]
+    values = sorted(float(row["similarity"]) for row in rows if row.get("similarity") is not None)
+    counts = {"labelled": 0, "unscored": 0, "population": len(values)}
+    if not values:
+        return counts
+
+    sorted_values = np.asarray(values, dtype=np.float64)
+    for row in rows:
+        if row.get("similarity") is None:
+            row["percentile"] = None
+            row["percentile_bucket"] = None
+            row["percentile_n"] = len(values)
+            counts["unscored"] += 1
+            continue
+        percentile = percentile_of(sorted_values, float(row["similarity"]))
+        row["percentile"] = round(percentile, 4)
+        row["percentile_bucket"] = bucket_for(percentile)
+        row["percentile_n"] = len(values)
+        counts["labelled"] += 1
+
+    # Rewritten through a temp file so an interrupted relabel cannot leave the
+    # similarity artifact half-labelled.
+    temp_path = path.with_name(path.name + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+    temp_path.replace(path)
+    return counts
+
+
 def load_similarity_index(path: Path) -> dict[tuple[str, str], Mapping[str, Any]]:
     """Similarity rows by `(clip_id, plan_id)`, for the filter to join against."""
     index: dict[tuple[str, str], Mapping[str, Any]] = {}
@@ -395,7 +536,7 @@ def load_completed(output_path: Path) -> set[tuple[str, str]]:
 
 
 def compute_similarities(
-    manifest_rows: Sequence[Mapping[str, Any]],
+    pairs: Any,
     config: MertSimilarityConfig,
     output_path: Path,
     resume: bool = False,
@@ -403,11 +544,16 @@ def compute_similarities(
     from_cache: bool = False,
     pairs_only: bool = False
 ) -> dict[str, int]:
-    """Write a similarity row per manifest row. Returns counts by outcome."""
+    """Write a similarity row per resolved pair. Returns counts by outcome.
+
+    Takes already-resolved `(identity, pair, reason)` triples rather than raw
+    rows, so one scoring loop serves both inputs: `iter_agent_pairs` for agent
+    input, `iter_pairs` for a render manifest.
+    """
     done = load_completed(output_path) if resume else set()
     jobs = [
         (row, pair, reason)
-        for row, pair, reason in iter_pairs(manifest_rows, config.reference)
+        for row, pair, reason in pairs
         if (str(row.get("clip_id")), str(row.get("plan_id"))) not in done
     ]
     if limit is not None:
@@ -469,6 +615,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="Skip pairs already scored without error.")
     parser.add_argument("--from-cache", action="store_true", help="Recompute similarities from cached embeddings without loading MERT.")
     parser.add_argument("--pairs-only", action="store_true", help="Resolve and report pairs without embedding anything. No model, no GPU.")
+    parser.add_argument("--label-percentiles", action="store_true", help="Only relabel an existing similarity file with global percentiles, then exit. No model, no GPU.")
+    parser.add_argument("--no-label-percentiles", action="store_true", help="Skip the percentile pass after scoring, e.g. when this run is one shard of a corpus.")
     return parser.parse_args()
 
 
@@ -514,6 +662,15 @@ def main() -> None:
     args = parse_args()
     config = resolve_mert_config(args)
 
+    if args.label_percentiles:
+        if not config.similarity_path.exists():
+            raise SystemExit("Nothing to label: '%s' does not exist." % config.similarity_path)
+        counts = label_percentiles(config.similarity_path)
+        log_event("labelled %d row(s) against a population of %d, %d unscored -> %s" % (
+            counts["labelled"], counts["population"], counts["unscored"], config.similarity_path
+        ))
+        return
+
     if config.render_manifest is None:
         raise SystemExit("No render manifest. Pass --render-manifest or set rejection.mert_similarity.render_manifest.")
     if not config.render_manifest.exists():
@@ -523,7 +680,7 @@ def main() -> None:
     log_event("%d manifest rows from %s" % (len(manifest_rows), config.render_manifest))
 
     counts = compute_similarities(
-        manifest_rows,
+        iter_pairs(manifest_rows, config.reference),
         config,
         config.similarity_path,
         resume=args.resume,
@@ -537,6 +694,15 @@ def main() -> None:
             counts["cache_hits"], counts["cache_misses"], config.similarity_path
         )
     )
+    if args.pairs_only or args.no_label_percentiles:
+        # A shard run must not label: its percentiles would rank against its own
+        # slice rather than the corpus. Run --label-percentiles once at the end.
+        if not args.pairs_only:
+            log_event("skipped the percentile pass; run --label-percentiles once every shard has finished")
+    else:
+        labels = label_percentiles(config.similarity_path)
+        log_event("percentiles over a population of %d (%d unscored rows left null)" % (labels["population"], labels["unscored"]))
+
     if counts["failed"]:
         raise SystemExit(1)
 

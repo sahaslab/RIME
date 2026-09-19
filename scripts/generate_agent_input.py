@@ -8,7 +8,7 @@ artifact in render_manifest_*.jsonl using:
 
 Outputs a JSONL file where each line is the plan-prompt record enriched
 with a new "output_path" field containing the rendered .wav path.
-Unmatched plan-prompt rows are written with "artifact_dir": null.
+Plan-prompt rows with no successful render (missing or "status": "error") are dropped.
 """
 
 import json
@@ -34,7 +34,7 @@ def load_render_poison_index(manifest: list[dict]) -> dict:
 
 def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path: str, poisoning: bool=False, training: bool=False):
     if not training: 
-        manifest = load_records(manifest_path)
+        manifest = [r for r in load_records(manifest_path) if r.get("status") != "error"]
         if poisoning:
             index = load_render_poison_index(manifest)
         else: 
@@ -48,6 +48,8 @@ def generate_agent_input(plan_prompts_path: str, manifest_path: str, output_path
 
         if not training:
             key = (record["clip_id"], record["plan_id"])
+            if key not in index:
+                continue
         
         if poisoning:
             gt_path, baseline_path = index.get(key, (None, None))

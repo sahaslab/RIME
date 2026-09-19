@@ -66,18 +66,33 @@ REACH_DORMANT_NO_PARAM = "dormant_no_param"
 REACH_UNREACHABLE_OPERATOR = "unreachable_operator"
 REACH_DATA_DEPENDENT = "data_dependent"
 
+# Graph-block fields whose values name something inside the edit graph:
+# step labels, stem handles, routing endpoints. Leaking any of them into an
+# instruction is leaking the implementation.
+GRAPH_IDENTIFIER_FIELDS = ("name", "prefix", "source", "output", "stem", "residual", "description")
+
+# How a rewrite can fail to describe the level below it. Not mutually
+# exclusive across a whole rewrite, so these are reported as a list.
+#
+#   wrong_interpretation  the element IS in the source but is described wrongly
+#                         -- wrong direction, wrong magnitude band, wrong stem,
+#                         wrong processor. Information present, but wrong.
+#   hallucination         processing, a parameter or a target that is not in
+#                         the source at all. Added, not distorted.
+#   omission              something the level's contract obliged it to carry is
+#                         absent. NOT "less detailed": discarding what the
+#                         contract permits is the contract working.
+CONSISTENCY_FAILURES = ("wrong_interpretation", "hallucination", "omission")
+
+VERDICT_LEAKED = "leaked"
+VERDICT_CLEAN = "clean"
+
 # Verdict dispositions.
 DISPOSITION_ACCEPT = "accept"
 DISPOSITION_REJECT = "reject"
 DISPOSITION_REVIEW = "review"
 
 UNCLEAR_ACTIONS = ("keep", "reject", "review")
-
-# The `similarity` flag's verdict when a threshold is configured and met. Named
-# rather than boolean so it reads the same way in `reject_reasons` as the enum
-# verdicts do.
-VERDICT_TOO_SIMILAR = "too_similar"
-VERDICT_AUDIBLE = "audible"
 
 # Which manifest field supplies the A-side of the comparison.
 REFERENCE_MODES = ("baseline_then_source", "baseline_only", "source_only")
@@ -208,6 +223,8 @@ class RejectionConfig:
     review_path: Path | None
     failures_path: Path | None
     full_manifest_path: Path | None
+    report_path: Path | None
+    captions_path: Path | None
     mert: MertSimilarityConfig
     max_attempts: int
     max_workers: int
@@ -221,15 +238,49 @@ class RejectionConfig:
     output_contract: str
     constraint_glosses: Mapping[str, Mapping[str, str]]
     caption_cues: Mapping[str, tuple[str, ...]]
+    leak_syntax_patterns: tuple[str, ...]
+    leak_allow: tuple[str, ...]
+    # Which consistency failure types actually reject, as opposed to being
+    # recorded. Kept separate from `reject_verdicts` because the verdict stays
+    # an honest "did it describe the source correctly", while whether a given
+    # kind of wrongness is disqualifying is a policy call.
+    reject_failures: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     version: int = 1
+    # Inputs a criterion may declare in `requires` that this run cannot supply,
+    # so criteria depending on them are dropped rather than run to a null
+    # verdict. Dropping is not the same as letting them report `no_caption`:
+    # that verdict routes through `reject_policy.unclear`, which would send
+    # every row of a caption-less corpus to the review queue.
+    skip_requires: tuple[str, ...] = field(default_factory=tuple)
+    # Whether the judge grades abstraction level 0. Off by default: AL0 is the
+    # verbatim transcription of the graph, so its rubric ("every operator is
+    # named", "operator order matches") is close to what the mechanical checks
+    # already settle, and judging it costs a third of the run for the least
+    # interesting level. The abstraction proper is AL1 and AL2.
+    include_al0: bool = False
 
     def selected_criteria(self) -> tuple[Criterion, ...]:
-        if not self.criteria_filter:
-            return self.criteria
-        missing = [name for name in self.criteria_filter if all(name != item.id for item in self.criteria)]
-        if missing:
-            raise ValueError("Unknown criteria %s." % ", ".join(missing))
-        return tuple(item for item in self.criteria if item.id in self.criteria_filter)
+        selected = self.criteria
+        if self.criteria_filter:
+            missing = [name for name in self.criteria_filter if all(name != item.id for item in selected)]
+            if missing:
+                raise ValueError("Unknown criteria %s." % ", ".join(missing))
+            selected = tuple(item for item in selected if item.id in self.criteria_filter)
+        if self.skip_requires:
+            selected = tuple(item for item in selected if not set(item.requires) & set(self.skip_requires))
+        if not selected:
+            raise ValueError(
+                "No criteria left to evaluate: criteria=%s, skip_requires=%s." % (
+                    list(self.criteria_filter) or "all", list(self.skip_requires)
+                )
+            )
+        return selected
+
+    def dropped_criteria(self) -> tuple[Criterion, ...]:
+        """Criteria excluded because this run cannot supply what they require."""
+        if not self.skip_requires:
+            return ()
+        return tuple(item for item in self.criteria if set(item.requires) & set(self.skip_requires))
 
     def flag_names(self) -> tuple[str, ...]:
         return tuple(name for item in self.selected_criteria() for name in item.produces)
@@ -275,6 +326,8 @@ class RejectionConfig:
             review_path=_optional_path(paths, "review"),
             failures_path=_optional_path(paths, "failures"),
             full_manifest_path=_optional_path(paths, "full_manifest"),
+            report_path=_optional_path(paths, "report"),
+            captions_path=_optional_path(paths, "captions"),
             mert=MertSimilarityConfig.from_mapping(section.get("mert_similarity") or {}, str(path)),
             max_attempts=max_attempts,
             max_workers=max_workers,
@@ -285,7 +338,7 @@ class RejectionConfig:
             reject_verdicts={
                 name: tuple(values)
                 for name, values in policy.items()
-                if name not in ("unclear", "on_judge_error")
+                if name not in ("unclear", "on_judge_error") and not name.endswith("_failures")
             },
             unclear_actions=dict(unclear),
             on_judge_error=on_judge_error,
@@ -294,6 +347,13 @@ class RejectionConfig:
             caption_cues={
                 name: tuple(str(cue).lower() for cue in cues)
                 for name, cues in (section.get("caption_cues") or {}).items()
+            },
+            leak_syntax_patterns=tuple(str(item) for item in (section.get("implementation_leak") or {}).get("syntax_patterns") or []),
+            leak_allow=tuple(str(item) for item in (section.get("implementation_leak") or {}).get("allow") or []),
+            reject_failures={
+                name[: -len("_failures")]: tuple(str(v) for v in values)
+                for name, values in policy.items()
+                if name.endswith("_failures")
             },
             version=int(loaded.get("version", 1))
         )
@@ -408,25 +468,80 @@ def _optional_path(paths: Mapping[str, Any], key: str) -> Path | None:
 # --------------------------------------------------------------------------
 
 
-def caption_text(row: Mapping[str, Any], analysis: Mapping[str, Any] | None) -> str:
+def load_captions(path: Path) -> dict[str, str]:
+    """MusicCaps captions by clip id, read from the dataset CSV.
+
+    The prose caption is what this criterion is supposed to read, and it is the
+    one thing the pipeline drops: the manifest keeps `aspect_list`, the mined
+    phrase set, but `caption` arrives null in every prompt row. The two are not
+    interchangeable. The phrases for one clip are
+
+        slide guitar, blues, intricate acoustic guitar playing, guitar layers
+
+    while the caption for the same clip says
+
+        "This is a high-octane blues song ... There's a distant filtered vocal
+         hum which sounds like it is coming from another room"
+
+    Only the caption carries "distant" and "from another room" -- production
+    language, which is precisely what the space and fidelity cues match on.
+    Judging against the phrase list means judging against a description with the
+    production stripped out of it.
+    """
+    import csv
+
+    captions: dict[str, str] = {}
+    with Path(path).open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if "ytid" not in (reader.fieldnames or []) or "caption" not in (reader.fieldnames or []):
+            raise ValueError("Captions file '%s' needs `ytid` and `caption` columns; found %s." % (path, reader.fieldnames))
+        for row in reader:
+            ytid, caption = row.get("ytid"), row.get("caption")
+            if ytid and caption:
+                captions[str(ytid)] = str(caption)
+    return captions
+
+
+def caption_text(
+    row: Mapping[str, Any],
+    analysis: Mapping[str, Any] | None = None,
+    caption: str | None = None
+) -> str:
     """The clip's caption plus its aspect phrases, as one lowercase string.
 
     Both halves matter. The caption is prose about the clip; the aspect list is
     the phrase set the tagger mined it into, and it survives distinctions the
-    caption buries. `aspect_list` exists only in the analysis manifest -- the
-    plan row drops it -- which is why the re-join is not optional for this
-    criterion.
+    caption buries.
+
+    Three places are read, because which of them is populated varies by how the
+    artifact was built. Newer prompt rows carry the whole analysis record at
+    `metadata.analysis`, which is the richest source and needs no re-join --
+    and on the MusicCaps prompt artifact it is the ONLY source, since
+    `metadata.caption` is null on every row there while
+    `metadata.analysis.dataset.aspect_list` is populated on all of them. Older
+    plan rows flatten the caption to a top-level `metadata.caption` and drop the
+    aspects entirely, which is what the re-joined `analysis` argument covers.
+
+    Reading all three and de-duplicating is cheaper than deciding which one a
+    given artifact used.
     """
     metadata = row.get("metadata") or {}
     pieces: list[str] = []
+    # The real prose caption first, where one was supplied, so it leads the
+    # string the cues and the judge read.
+    if caption:
+        pieces.append(str(caption))
     # The plan row flattens this to a top-level `caption`, not `analysis.caption`.
     for candidate in (metadata.get("caption"), row.get("caption")):
         if candidate:
             pieces.append(str(candidate))
-    if analysis:
-        if analysis.get("caption"):
-            pieces.append(str(analysis["caption"]))
-        dataset = analysis.get("dataset") or {}
+    # The row's own analysis first, then a re-joined one. Same shape either way.
+    for record in (metadata.get("analysis"), analysis):
+        if not record:
+            continue
+        if record.get("caption"):
+            pieces.append(str(record["caption"]))
+        dataset = record.get("dataset") or {}
         for aspect in dataset.get("aspect_list") or []:
             pieces.append(str(aspect))
     return " ".join(dict.fromkeys(pieces)).lower()
@@ -526,7 +641,8 @@ def build_context(
     row: Mapping[str, Any],
     reader: ChainReader,
     config: RejectionConfig,
-    analysis: Mapping[str, Any] | None = None
+    analysis: Mapping[str, Any] | None = None,
+    caption: str | None = None
 ) -> dict[str, Any]:
     """The context a rule's trigger is evaluated against.
 
@@ -540,7 +656,7 @@ def build_context(
     graph_spec = metadata.get("graph_spec") or []
     profile = reader.profile(graph_spec)
     params = param_maps(reader, graph_spec)
-    text = caption_text(row, analysis)
+    text = caption_text(row, analysis, caption)
     flags = caption_flags(text, config.caption_cues)
     derived = derived_fields(row, params, analysis)
     derived["has_caption"] = bool(text.strip())
@@ -822,12 +938,21 @@ def render_level_prompt(
     parent_text: str | None,
     criterion: Criterion,
     config: RejectionConfig,
-    hard_violations: Sequence[str]
+    hard_violations: Sequence[str],
+    level: Any = None
 ) -> str:
     """The judge prompt for one abstraction level.
 
     Carries the level's own rules and rubric, the contract it was written under
     glossed into obligations, and the graph or parent text it must stay true to.
+
+    The rubric, rules and constraints come from the CURRENT ladder when one is
+    supplied, not from the row. The row's copies were frozen at generation time,
+    so judging against them would grade every artifact by whatever the ladder
+    happened to say when it was written -- and an edit to a rubric would never
+    reach the judge. Same reason the mechanical checks are re-run rather than
+    read back. The row's copies remain the fallback for a level the ladder no
+    longer defines.
     """
     blocks: list[str] = []
     blocks.append("EDIT GRAPH\n%s" % (row.get("metadata", {}).get("graph_description") or "(none recorded)"))
@@ -837,24 +962,35 @@ def render_level_prompt(
         blocks.append("SOURCE (abstraction level %s)\n%s" % (entry.get("derived_from"), parent_text))
     blocks.append("INSTRUCTION UNDER AUDIT (abstraction level %s, '%s')\n%s" % (entry.get("abstraction_level"), entry.get("name"), entry.get("text") or ""))
 
-    rules = entry.get("rules") or []
+    rules = list(getattr(level, "rules", None) or entry.get("rules") or [])
     if rules:
         blocks.append("RULES THIS INSTRUCTION WAS WRITTEN UNDER\n%s" % "\n".join("- %s" % rule for rule in rules))
 
-    rubric = entry.get("rubric") or []
+    rubric = list(getattr(level, "rubric", None) or entry.get("rubric") or [])
     if rubric:
         blocks.append("RUBRIC ITEMS, BY INDEX\n%s" % "\n".join("%d. %s" % (index, item) for index, item in enumerate(rubric)))
 
-    glossed = render_constraint_glosses(entry.get("constraints") or {}, config)
+    constraints = getattr(level, "constraints", None) or entry.get("constraints") or {}
+    glossed = render_constraint_glosses(constraints, config)
     if glossed:
-        blocks.append("CONTRACT FOR THIS LEVEL\n%s" % glossed)
+        # Retitled from "CONTRACT": under the fidelity framing this is no
+        # longer the thing being graded, it is what makes "left something out"
+        # answerable at all. AL2 is *supposed* to drop every parameter value,
+        # so a judge asked about omission without this would fail every level.
+        blocks.append(
+            "WHAT THIS LEVEL IS LICENSED TO DISCARD\n%s\n"
+            "Discarding any of the above is correct and is never an omission. "
+            "Omission means dropping something this level was obliged to keep." % glossed
+        )
 
     bands = row.get("band_assignments") or {}
     if bands:
         blocks.append("BAND THE GRAPH SPECIFIES FOR EACH PARAMETER\n%s" % "\n".join("- %s: %s" % (name, band) for name, band in sorted(bands.items())))
 
     magnitude = row.get("chain_magnitude") or {}
-    if magnitude:
+    # Omitted when the chain has no magnitude-role parameter at all: printing
+    # "None (None)" tells the judge nothing and invites it to invent a reading.
+    if magnitude.get("band") is not None:
         blocks.append("COMPUTED CHAIN INTENSITY\n%s (%s)" % (magnitude.get("band"), magnitude.get("value")))
 
     tags = row.get("chain_tags") or []
@@ -869,9 +1005,14 @@ def render_level_prompt(
     blocks.append(render_exemplars(criterion))
     blocks.append(
         "Return JSON of exactly this shape:\n"
-        '{"al_rules": {"verdict": "pass|fail", "failed_rubric_items": [<int>]}, '
-        '"al_consistency": {"verdict": "pass|fail", "violated_constraints": ["<constraint name>"]}, '
-        '"rationale": "<one or two sentences>"}'
+        '{"al_rules": {"verdict": "pass|fail", "failed_rubric_items": [<int>], '
+        '"rationale": "<ONE sentence: which rubric item is broken and how>"}, '
+        '"al_consistency": {"verdict": "pass|fail", "failures": [%s], '
+        '"rationale": "<ONE sentence: what it gets wrong about the source>"}}\n'
+        "Give each verdict its own rationale. They answer different questions and "
+        "can disagree, so one sentence covering both explains neither. A passing "
+        "verdict needs no rationale and an empty failures list."
+        % " | ".join('"%s"' % item for item in CONSISTENCY_FAILURES)
     )
     return "\n\n".join(block for block in blocks if block)
 
@@ -962,7 +1103,8 @@ def render_row_prompt(
     blocks.append(render_exemplars(criterion))
     blocks.append(
         "Return JSON of exactly this shape:\n"
-        '{"verdict": "%s", "cited_rules": ["<rule id>"], "caption_evidence": "<the words you relied on, or null>", "rationale": "<one or two sentences>"}'
+        '{"verdict": "%s", "cited_rules": ["<rule id>"], "caption_evidence": "<the words you relied on, or null>", '
+        '"rationale": "<ONE sentence saying what is wrong and why>"}'
         % "|".join(criterion.values)
     )
     return "\n\n".join(block for block in blocks if block)
@@ -1001,6 +1143,16 @@ def parse_verdict(text: str, criterion: Criterion) -> tuple[dict[str, Any] | Non
                 continue
             if section.get("verdict") not in ("pass", "fail"):
                 problems.append("'%s.verdict' must be pass or fail, got %r" % (flag, section.get("verdict")))
+            # A judge inventing a fourth failure label is a parse failure, not
+            # a silently-dropped field: the retry gets a chance to fix it.
+            failures = section.get("failures")
+            if failures is not None:
+                if not isinstance(failures, list):
+                    problems.append("'%s.failures' must be a list" % flag)
+                else:
+                    unknown = [item for item in failures if item not in CONSISTENCY_FAILURES]
+                    if unknown:
+                        problems.append("'%s.failures' has unknown value(s) %s; expected from %s" % (flag, unknown, ", ".join(CONSISTENCY_FAILURES)))
     else:
         if parsed.get("verdict") not in criterion.values:
             problems.append("'verdict' must be one of %s, got %r" % (", ".join(criterion.values), parsed.get("verdict")))
@@ -1037,6 +1189,14 @@ def disposition_for(
             elif config.on_judge_error == "review":
                 review_reasons.append(name)
             continue
+        # A flag carrying `failures` is rejected on which kinds it found, not
+        # on the bare verdict: the verdict says the rewrite is wrong, the
+        # failure types say whether that kind of wrongness disqualifies it.
+        rejecting_failures = config.reject_failures.get(name)
+        if rejecting_failures is not None and "failures" in flag:
+            if set(flag.get("failures") or ()) & set(rejecting_failures):
+                reject_reasons.append(name)
+            continue
         if verdict in config.reject_verdicts.get(name, ()):
             reject_reasons.append(name)
             continue
@@ -1053,48 +1213,236 @@ def disposition_for(
     return DISPOSITION_ACCEPT, ()
 
 
-def similarity_flag(
-    row: Mapping[str, Any] | None,
-    config: MertSimilarityConfig
-) -> dict[str, Any]:
-    """The `similarity` flag for one record, from a precomputed similarity row.
+# Keys that identify a row written by scripts/generate_agent_input.py: it nests
+# the whole prompt row under `metadata` and adds the two audio paths beside it.
+AGENT_INPUT_KEYS = ("ground_truth_edit_audio", "input_audio", "metadata")
 
-    The verdict is `None` whenever no threshold is configured, which is the
-    default: the cosine is recorded and nothing is rejected on a cutoff nobody
-    has chosen from data yet. `reject_policy.unclear.similarity` then decides
-    what a null verdict does, exactly as it does for the enum criteria.
+# Keys a prompt row carries at its own top level.
+PROMPT_ROW_KEYS = ("clip_id", "plan_id", "prompt_levels")
 
-    The raw value is always carried, so re-thresholding never means re-running
-    MERT over the corpus.
+
+def is_agent_input(row: Mapping[str, Any]) -> bool:
+    """Whether a row is agent input rather than a bare prompt row.
+
+    Decided on the nesting, not on the audio keys alone: a prompt row also
+    carries `input_audio`, so only the whole prompt row sitting under
+    `metadata` distinguishes the two.
     """
-    flag: dict[str, Any] = {
-        "verdict": None,
-        "model": config.model,
-        "layer": config.layer,
-        "threshold": config.similarity_threshold
-    }
-    if row is None:
-        flag["reason"] = "not_scored"
-        return flag
-    if row.get("error"):
-        flag["reason"] = "similarity_error"
-        flag["error"] = row["error"]
-        return flag
+    if not all(key in row for key in AGENT_INPUT_KEYS):
+        return False
+    nested = row.get("metadata")
+    return isinstance(nested, Mapping) and all(key in nested for key in PROMPT_ROW_KEYS)
 
-    value = row.get("similarity")
-    flag["value"] = value
-    for key in ("reference", "poison_repair", "render_status"):
-        if key in row:
-            flag[key] = row[key]
-    if value is None:
-        flag["reason"] = row.get("reason") or "not_scored"
-        return flag
-    if config.similarity_threshold is None:
-        return flag
-    # At or above the threshold, the edit is too close to the original to be
-    # noticeable, which is the thing this criterion exists to catch.
-    flag["verdict"] = VERDICT_TOO_SIMILAR if float(value) >= config.similarity_threshold else VERDICT_AUDIBLE
-    return flag
+
+@dataclass(frozen=True)
+class RowAudio:
+    """The rendered pair a row points at, if it carries one."""
+
+    reference_path: str
+    edited_path: str
+    reference: str
+    poison_repair: bool
+
+
+def normalize_row(row: Mapping[str, Any]) -> tuple[Mapping[str, Any], RowAudio | None]:
+    """A row as `(prompt_row, audio)`, accepting either input format.
+
+    Agent input is the richer of the two and the default, because it is the only
+    artifact carrying both the prompt and the location of the rendered audio --
+    the prompt file has no paths, the render manifest has no prompts. Unwrapping
+    it here means every criterion downstream sees the same prompt-row shape
+    whichever file was passed.
+
+    The reference side needs care. In the ordinary mode agent input sets
+    `input_audio` to the untouched source, so the similarity measures the edit
+    *plus* Demucs separation loss; the no-FX baseline that isolates the edit
+    alone lives only in the render manifest, which is why a manifest can still
+    be supplied to upgrade it.
+
+    In poisoning mode agent input sets `input_audio` to the *degraded* audio and
+    moves the clean original to `metadata.original_clean_audio`. Comparing
+    against the degraded version would measure repair fidelity rather than edit
+    strength, so the clean original is preferred where it exists.
+    """
+    if not is_agent_input(row):
+        return row, None
+
+    prompt_row = row["metadata"]
+    edited = row.get("ground_truth_edit_audio")
+    plan = prompt_row.get("metadata") or {}
+    poison_repair = bool(plan.get("poison_graph_spec"))
+    clean = prompt_row.get("original_clean_audio") or row.get("original_clean_audio")
+
+    if poison_repair and clean:
+        reference, kind = clean, "source"
+    elif poison_repair:
+        # No clean original recorded, so the only reference is the degraded
+        # input. Still reported, but marked so it is never pooled with the rest.
+        reference, kind = row.get("input_audio"), "poisoned_input"
+    else:
+        reference, kind = row.get("input_audio"), "source"
+
+    if not reference or not edited:
+        return prompt_row, None
+    return prompt_row, RowAudio(str(reference), str(edited), kind, poison_repair)
+
+
+def leak_identifiers(registry: OperatorRegistry, graph_spec: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Identifiers that would betray the implementation if they appeared verbatim.
+
+    Derived rather than listed, from two sources: the operator registry, which
+    supplies every function name and parameter name the pipeline can emit, and
+    the row's own graph, which supplies the step labels and stem handles
+    (`target_stem`, `residual`, `hum_cleanup`) that vary per plan. A new
+    operator or a renamed motif step is therefore covered with no edit here.
+
+    Only multi-word identifiers are returned -- anything carrying an underscore.
+    A single bare word like `drums` or `reverb` is exactly what a human would
+    say, so matching on it would flag correct prose; `apply_reverb_effect` and
+    `room_size` are things only a machine writes.
+    """
+    identifiers: set[str] = set()
+    for name in registry.names():
+        spec = registry.resolve(name)
+        identifiers.add(name)
+        identifiers.update(spec.aliases)
+        identifiers.update(spec.params)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for field_name, value in node.items():
+                if field_name in GRAPH_IDENTIFIER_FIELDS and isinstance(value, str):
+                    identifiers.add(value)
+                walk(value)
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    walk(graph_spec)
+    return {item for item in identifiers if "_" in item}
+
+
+def implementation_leaks(
+    text: str,
+    identifiers: Sequence[str],
+    syntax_patterns: Sequence[str]
+) -> list[dict[str, str]]:
+    """Every machine-only token or syntax fragment an instruction leaked.
+
+    An instruction is meant to read as something a person would say. Text that
+    names `separate_audio`, writes `apply_reverb_effect(room_size=0.9)` or
+    carries a `->` from the graph is describing the implementation instead, and
+    is not usable as training text whatever else is right about it.
+
+    Matched on word boundaries against the raw text, not the normalized form the
+    mention checks use: the underscores and punctuation are precisely the
+    evidence here, so stripping them would destroy the signal.
+    """
+    if not text:
+        return []
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for identifier in identifiers:
+        if re.search(r"\b%s\b" % re.escape(identifier), text):
+            key = ("identifier", identifier)
+            if key not in seen:
+                seen.add(key)
+                found.append({"kind": "identifier", "token": identifier})
+    for pattern in syntax_patterns:
+        match = re.search(pattern, text)
+        if match:
+            key = ("syntax", pattern)
+            if key not in seen:
+                seen.add(key)
+                found.append({"kind": "syntax", "token": match.group(0)[:40], "pattern": pattern})
+    return found
+
+
+def report_row(
+    record: Mapping[str, Any],
+    verdict: Mapping[str, Any],
+    config: "RejectionConfig | None" = None
+) -> dict[str, Any]:
+    """One flat row: the prompts, their ids, and each flag's status.
+
+    The lean counterpart to `full_manifest_row`. One column per flag rather than
+    a nested object, so the result loads straight into a dataframe and a flag
+    rate is a groupby rather than a traversal.
+
+    `prompt_variants` is carried verbatim because it is what was actually
+    judged: it is exactly `[e["text"] for e in prompt_levels]` ordered by level,
+    so a reader can see the text a verdict refers to without opening the input.
+
+    Carries judged verdicts only. The mechanical `checks.hard` results are
+    deliberately absent: they are a regex's answer to a different question, and
+    they are in the sidecar for anyone who needs them. `implementation_leak` is
+    here despite also being deterministic, because it is a requested criterion
+    in its own right rather than part of the ladder's hard checks.
+    """
+    flags = verdict.get("flags") or {}
+    row: dict[str, Any] = {
+        "clip_id": verdict.get("clip_id") or record.get("clip_id"),
+        "plan_id": verdict.get("plan_id") or record.get("plan_id"),
+        # What the stylistic criterion actually read, so a verdict about the
+        # music can be checked against the description it was based on. On the
+        # MusicCaps artifact the raw caption is null and this is the mined
+        # aspect phrases; `caption_text` joins whichever is present.
+        "caption": verdict.get("caption"),
+        # The rendered graph, not `graph_spec`. This is the exact string the
+        # judge was shown in its EDIT GRAPH block, so a verdict can be read
+        # against what produced it; the structured form is five times the size
+        # and is in the full manifest for anyone who needs to query it.
+        "graph_description": (record.get("metadata") or {}).get("graph_description"),
+        "prompt_variants": list(record.get("prompt_variants") or [])
+    }
+    for name, flag in flags.items():
+        if name == "mechanical":
+            # Left out of the report on purpose. `checks.hard` answers a
+            # different question from the judge -- whether a regex matched --
+            # and on this corpus it fails so often that it drowns the verdicts
+            # this table exists to show. It is still computed and still written
+            # to the sidecar, which is where to go when a judged verdict needs
+            # explaining.
+            continue
+        if name == "implementation_leak":
+            row["implementation_leak"] = flag.get("verdict")
+            row["implementation_leak_levels"] = list(flag.get("leaked_levels") or [])
+            # The offending tokens, deduplicated across levels. This is the
+            # actionable part -- knowing a row leaked is less use than knowing
+            # it leaked `separate_audio` and a graph arrow.
+            tokens: list[str] = []
+            for part in (flag.get("per_level") or {}).values():
+                for leak in part.get("leaks") or []:
+                    if leak["token"] not in tokens:
+                        tokens.append(leak["token"])
+            row["implementation_leak_tokens"] = tokens
+            continue
+        # A flag with no verdict reports its reason instead, so a null column is
+        # never silently indistinguishable from a criterion that did not run.
+        row[name] = flag.get("verdict")
+        if flag.get("failures"):
+            row["%s_failures" % name] = list(flag["failures"])
+        reason = flag.get("reason") or next(
+            (label for label in ("judge_error", "dry_run") if flag.get(label)), None
+        )
+        if flag.get("verdict") is None and reason:
+            row["%s_reason" % name] = reason
+        # The judge's one-sentence justification, but only where the verdict
+        # actually rejects. A reason attached to a pass is noise in a table
+        # nobody will read, and it doubles the width of the common case.
+        #
+        # Which verdicts count as failing comes from `reject_policy`, not a
+        # hardcoded list, so adding `unclear` to a criterion's reject list makes
+        # its reasons appear too. Without a config the rationale is carried
+        # as-is, since there is then nothing to decide against.
+        rejecting = config.reject_verdicts.get(name, ()) if config is not None else None
+        fails = rejecting is None or flag.get("verdict") in rejecting
+        if flag.get("rationale") and fails:
+            row["%s_why" % name] = flag["rationale"]
+    row["disposition"] = verdict.get("disposition")
+    row["reject_reasons"] = list(verdict.get("reject_reasons") or [])
+    return row
 
 
 def full_manifest_row(

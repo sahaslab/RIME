@@ -4,7 +4,6 @@ import heapq
 import argparse
 from pathlib import Path
 from collections import Counter, defaultdict
-from fractions import Fraction
 from typing import Any
 from tqdm import tqdm
 from plan_audit_utils import (
@@ -41,8 +40,6 @@ def main():
     parser.add_argument("--limit", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-per-source-recipe", type=int, default=3)
-    parser.add_argument("--max-random-fraction", type=float, default=0.15)
-    parser.add_argument("--max-poison-fraction", type=float, default=0.0)
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--input-limit", type=int, default=None)
     args = parser.parse_args()
@@ -89,10 +86,6 @@ def main():
         if args.analysis_path
         else None,
         "max_per_source_recipe": args.max_per_source_recipe,
-        "max_random_fraction": args.max_random_fraction,
-        "max_poison_fraction": args.max_poison_fraction,
-        "poison_selected": sum(candidates[index]["poisoned"] for index in selected),
-        "random_selected": sum(candidates[index]["recipe_id"] == "random_constrained" for index in selected),
         "unmodeled_parameter_occurrences": dict(unmodeled),
         "coverage": [
             {
@@ -142,7 +135,6 @@ def read_candidates(
             candidates.append(
                 {
                     "offset": offset,
-                    "poisoned": bool(row.get("poison_id") or row.get("poison_graph_spec")),
                     "clip_id": row["clip_id"],
                     "recipe_id": row["recipe_id"],
                 }
@@ -185,61 +177,26 @@ def select_candidates(
     features: list[set[tuple[str, str]]],
     args: argparse.Namespace,
 ) -> tuple[list[int], dict[int, float]]:
-    assert 0.0 <= args.max_random_fraction <= 1.0
-    assert 0.0 <= args.max_poison_fraction <= 1.0
-    fraction = Fraction(str(args.max_random_fraction))
-    poison_fraction = Fraction(str(args.max_poison_fraction))
-    available = Counter()
-    groups = Counter(
-        (candidate["clip_id"], candidate["recipe_id"])
-        for candidate in candidates
-        if poison_fraction or not candidate.get("poisoned", False)
-    )
-    for (_, recipe), count in groups.items():
-        available[recipe == "random_constrained"] += (
-            min(count, args.max_per_source_recipe)
-            if args.max_per_source_recipe
-            else count
-        )
-    target = min(args.limit, sum(available.values()))
-    if fraction < 1:
-        target = min(target, int(available[False] / (1 - fraction)))
-    random_limit = int(target * fraction)
-    poison_limit = int(target * poison_fraction)
-    selected_poison = 0
-    selected_random = 0
     order = list(range(len(candidates)))
     random.Random(args.seed).shuffle(order)
     counts = Counter()
     source_counts = Counter()
     selected = []
     scores = {}
-
-    def eligible(index: int) -> bool:
-        candidate = candidates[index]
-        key = (candidate["clip_id"], candidate["recipe_id"])
-        return (
-            index not in scores
-            and (not candidate.get("poisoned", False) or selected_poison < poison_limit)
-            and (not args.max_per_source_recipe or source_counts[key] < args.max_per_source_recipe)
-            and (candidate["recipe_id"] != "random_constrained" or selected_random < random_limit)
-        )
-
     if args.policy == "random":
         for index in tqdm(order, desc="Selecting random plans"):
-            if len(selected) >= target:
+            if len(selected) >= args.limit:
                 break
             candidate = candidates[index]
             key = (candidate["clip_id"], candidate["recipe_id"])
-            if not eligible(index):
+            if (
+                args.max_per_source_recipe
+                and source_counts[key] >= args.max_per_source_recipe
+            ):
                 continue
             selected.append(index)
-            selected_random += candidate["recipe_id"] == "random_constrained"
-            selected_poison += candidate.get("poisoned", False)
             scores[index] = 0.0
             source_counts[key] += 1
-        if selected_random > int(len(selected) * fraction) or selected_poison > int(len(selected) * poison_fraction):
-            return select_candidates(candidates, features, argparse.Namespace(**(vars(args) | {"limit": len(selected)})))
         return selected, scores
 
     # Each prior has total feature weight one, regardless of its number of bins.
@@ -259,19 +216,25 @@ def select_candidates(
         sorted(groups, key=lambda key: (len(groups[key]), key)),
         desc="Covering recipes and targets",
     ):
-        if len(selected) >= target:
+        if len(selected) >= args.limit:
             break
         if counts[feature]:
             continue
-        eligible_indices = [index for index in groups[feature] if eligible(index)]
-        if not eligible_indices:
+        eligible = [
+            index
+            for index in groups[feature]
+            if not args.max_per_source_recipe
+            or source_counts[
+                (candidates[index]["clip_id"], candidates[index]["recipe_id"])
+            ]
+            < args.max_per_source_recipe
+        ]
+        if not eligible:
             continue
         index = max(
-            eligible_indices, key=lambda item: marginal_gain(features[item], counts, weights)
+            eligible, key=lambda item: marginal_gain(features[item], counts, weights)
         )
         selected.append(index)
-        selected_random += candidates[index]["recipe_id"] == "random_constrained"
-        selected_poison += candidates[index].get("poisoned", False)
         scores[index] = marginal_gain(features[index], counts, weights)
         counts.update(features[index])
         source_counts[
@@ -285,15 +248,18 @@ def select_candidates(
     heapq.heapify(heap)
     # Diminishing gains make cached scores upper bounds, enabling lazy greedy selection.
     with tqdm(
-        total=target,
+        total=min(args.limit, len(candidates)),
         initial=len(selected),
         desc="Selecting coverage plans",
     ) as progress:
-        while heap and len(selected) < target:
+        while heap and len(selected) < args.limit:
             _, tie, index = heapq.heappop(heap)
             candidate = candidates[index]
             key = (candidate["clip_id"], candidate["recipe_id"])
-            if not eligible(index):
+            if (
+                args.max_per_source_recipe
+                and source_counts[key] >= args.max_per_source_recipe
+            ):
                 continue
             score = marginal_gain(features[index], counts, weights)
             entry = (-score, tie, index)
@@ -301,14 +267,10 @@ def select_candidates(
                 heapq.heappush(heap, entry)
                 continue
             selected.append(index)
-            selected_random += candidate["recipe_id"] == "random_constrained"
-            selected_poison += candidate.get("poisoned", False)
             scores[index] = score
             counts.update(features[index])
             source_counts[key] += 1
             progress.update(1)
-    if selected_random > int(len(selected) * fraction) or selected_poison > int(len(selected) * poison_fraction):
-        return select_candidates(candidates, features, argparse.Namespace(**(vars(args) | {"limit": len(selected)})))
     return selected, scores
 
 

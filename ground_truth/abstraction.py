@@ -75,6 +75,38 @@ ALIAS_SUFFIXES = ("_effect", "_filter", "_tool")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
+# Decimal places used when a parameter declares no `precision` of its own.
+DEFAULT_PRECISION = 2
+
+# How a unit is written out when a value is displayed. The config spells units
+# in lower case because they are keys; prose wants dB and Hz.
+UNIT_DISPLAY = {"db": "dB", "hz": "Hz", "khz": "kHz", "ms": "ms", "seconds": "s"}
+
+# Units that name a scale rather than a physical quantity. "0.35 normalized" is
+# not something anyone writes, so these print as a bare number.
+UNITLESS = ("normalized", "ratio", "q")
+
+
+def format_value(value: Any, precision: int | None, unit: str | None = None) -> str:
+    """Render a value the way a person would write it, not the way it is stored.
+
+    The fitted priors are continuous, so a sampled cutoff arrives as
+    55.63485084437943. Nobody says that out loud, and a prompt that quotes it is
+    not a realistic instruction, so display rounds to the precision the
+    parameter declares. The graph and the rendered audio keep the exact value --
+    this is a presentation concern only.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return str(value)
+    places = DEFAULT_PRECISION if precision is None else max(0, int(precision))
+    rounded = round(float(value), places)
+    # `%g` drops the trailing zeros `%.*f` would leave, so 0.50 reads as 0.5.
+    text = "%d" % int(rounded) if places == 0 else "%g" % rounded
+    if not unit or unit.lower() in UNITLESS:
+        return text
+    return "%s %s" % (text, UNIT_DISPLAY.get(unit.lower(), unit))
+
+
 def text_words(text: str) -> tuple[str, ...]:
     """Lowercase alphanumeric words of a text, separators discarded."""
     return tuple(word for word in NON_ALNUM_RE.split(text.lower()) if word)
@@ -122,6 +154,9 @@ class ParamSpec:
     role: str
     direction: str = "ascending"
     unit: str | None = None
+    # Decimal places for display and for the value check. None inherits the
+    # lexicon's default.
+    precision: int | None = None
     weight: float = 1.0
     hint: str | None = None
     note: str | None = None
@@ -231,6 +266,9 @@ class ParamDescriptor:
     operator: str
     param: str
     value: Any
+    # The value as a person would write it, unit included: "56 Hz", "-6.2 dB".
+    display: str
+    precision: int | None
     role: str
     unit: str | None
     band_terms: tuple[str, ...]
@@ -276,9 +314,9 @@ class ChainProfile:
     # naming each. A stem mapped to an empty tuple is exempt from the check.
     stem_names: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
-    def param_values(self) -> tuple[tuple[str, Any], ...]:
+    def param_values(self) -> tuple[tuple[str, Any, int | None], ...]:
         return tuple(
-            ("%s.%s" % (item.operator, item.param), item.value)
+            ("%s.%s" % (item.operator, item.param), item.value, item.precision)
             for item in (*self.descriptors, *self.unbanded)
         )
 
@@ -303,9 +341,11 @@ class BandLexicon:
         version: int = 1,
         operator_names: Mapping[str, tuple[str, ...]] | None = None,
         stem_names: Mapping[str, tuple[str, ...]] | None = None,
-        chain_vocabulary: Sequence[str] = ()
+        chain_vocabulary: Sequence[str] = (),
+        default_precision: int = DEFAULT_PRECISION
     ):
         self.version = version
+        self.default_precision = int(default_precision)
         self._chain_vocabulary = tuple(chain_vocabulary)
         self._operator_names = dict(operator_names or {})
         self._stem_names = dict(stem_names or {})
@@ -366,8 +406,13 @@ class BandLexicon:
                 for stem, names in (loaded.get("stem_names") or {}).items()
             },
             # Display terms, not match tokens, so they keep their own spelling.
-            chain_vocabulary=tuple(loaded.get("chain_vocabulary") or ())
+            chain_vocabulary=tuple(loaded.get("chain_vocabulary") or ()),
+            default_precision=int(loaded.get("default_precision", DEFAULT_PRECISION))
         )
+
+    def precision_for(self, spec: ParamSpec) -> int:
+        """Decimal places to display a parameter at, falling back to the default."""
+        return self.default_precision if spec.precision is None else spec.precision
 
     @staticmethod
     def _normalize_names(names: Any) -> tuple[str, ...]:
@@ -585,12 +630,14 @@ class BandLexicon:
                 label=override_label
             )
 
+        precision = definition.get("precision")
         return ParamSpec(
             operator=owner,
             param=param,
             role=role,
             direction=direction,
             unit=definition.get("unit"),
+            precision=None if precision is None else int(precision),
             weight=float(definition.get("weight", 1.0)),
             hint=definition.get("hint"),
             note=definition.get("note"),
@@ -973,11 +1020,14 @@ class ChainReader:
         spec = spec.for_label(label)
         index, out_of_band = spec.band_index(value)
         terms = spec.bands[index].suggested_terms
+        precision = self.lexicon.precision_for(spec)
         return ParamDescriptor(
             label=label,
             operator=spec.operator,
             param=spec.param,
             value=value,
+            display=format_value(value, precision, spec.unit),
+            precision=precision,
             role=spec.role,
             unit=spec.unit,
             band_terms=terms,
@@ -987,18 +1037,21 @@ class ChainReader:
             out_of_band=out_of_band
         )
 
-    @staticmethod
     def _unbanded_descriptor(
+        self,
         label: str,
         owner: str,
         param: str,
         value: Any
     ) -> ParamDescriptor:
+        precision = self.lexicon.default_precision
         return ParamDescriptor(
             label=label,
             operator=owner,
             param=param,
             value=value,
+            display=format_value(value, precision),
+            precision=precision,
             role="character",
             unit=None,
             band_terms=(),
@@ -1265,19 +1318,53 @@ class AbstractionLadder:
     def _missing_values(cls, text: str, profile: ChainProfile) -> list[str]:
         normalized = NON_ALNUM_RE.sub("", text.lower())
         missing: list[str] = []
-        for name, value in profile.param_values():
+        for name, value, precision in profile.param_values():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
-            renderings = cls._value_renderings(float(value))
+            renderings = cls._value_renderings(float(value), precision)
             if not any(rendering in normalized for rendering in renderings):
                 missing.append("%s=%s" % (name, value))
         return missing
 
     @staticmethod
-    def _value_renderings(value: float) -> tuple[str, ...]:
+    def _value_renderings(value: float, precision: int | None = None) -> tuple[str, ...]:
+        """Every way a value may legitimately be written, for the AL0 check.
+
+        `%g` alone is not enough, and was silently failing compliant text. It
+        renders 6 significant figures, so 9.542225928900793 becomes "9.54223" --
+        which, once separators are stripped, is NOT a substring of the digits
+        the graph actually carries ("9542225928900793"). An instruction quoting
+        the value exactly therefore failed the check that demands it.
+
+        That went unnoticed while the priors declared discrete `samples` like
+        4.0 and 0.25, where `%g` is exact. The fitted priors are continuous and
+        nothing rounds, so every sampled value now arrives as float64 and the
+        mismatch applies to all of them: measured over 1000 rows, 36% of AL0's
+        `omitted value` failures had every value present verbatim.
+
+        So both ends are accepted: the full-precision form, and the rounded
+        forms a writer would sensibly use. A model that writes "9.54 ms" is
+        doing the more useful thing than one that transcribes 17 digits, and
+        neither should fail.
+
+        Rounding is accepted from the parameter's declared precision *and
+        finer*, never coarser. That asymmetry matters: a cutoff declares 0
+        places so "56" passes for 55.63, while a normalized mix declares 2, so
+        0.75 is not satisfied by a bare "1" -- which, being a single digit,
+        would otherwise match almost any text containing a number.
+        """
         magnitude = abs(value)
         plain = "%g" % magnitude
         renderings = {plain, plain.lstrip("0") or plain}
+        # The digits as the graph carries them.
+        renderings.add(repr(magnitude))
+        # Rounded to a precision a person would actually say. `%g` on the
+        # rounded value drops the trailing zeros that `%.*f` would leave, so
+        # 9.5 stays "9.5" rather than becoming "9.50".
+        floor = DEFAULT_PRECISION if precision is None else max(0, int(precision))
+        for places in range(floor, 5):
+            rounded = round(magnitude, places)
+            renderings.add("%d" % int(rounded) if places == 0 else "%g" % rounded)
         if magnitude >= 1000.0:
             renderings.add("%gk" % (magnitude / 1000.0))
         if magnitude.is_integer():

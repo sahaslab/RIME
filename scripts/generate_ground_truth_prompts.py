@@ -1,9 +1,11 @@
 import argparse
 import importlib.util
+import json
 import os
 import random
+import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 from threading import Lock
@@ -14,13 +16,15 @@ from tqdm import tqdm
 from typing import Any
 
 from ground_truth.abstraction import (
+    STRUCTURAL_OPERATORS,
     AbstractionLadder,
     AbstractionLevel,
     ChainProfile,
     ChainReader,
+    ParamDescriptor,
     load_abstraction_config
 )
-from ground_truth.io_utils import load_records, write_jsonl
+from ground_truth.io_utils import load_records
 from ground_truth.operators import load_operator_registry
 from ground_truth.summarization import (
     ModelSettings,
@@ -63,6 +67,16 @@ WORKER_ON_PROMPT: Callable[[], None] | None = None
 # Model settings memoized per config directory, for callers that reach
 # `build_prompt_chain` without going through `main()` (the prompt lab UI does).
 _MODEL_SETTINGS_CACHE: dict[Path, ModelSettings] = {}
+
+
+def log_event(message: str) -> None:
+    """Timestamped run line, in the same shape as the filter script's.
+
+    Routed through `tqdm.write` rather than `print` because these land while
+    the progress bar is live, and a bare write to stdout smears it. With no bar
+    open it is an ordinary stdout write.
+    """
+    tqdm.write("[prompts] %s | %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,6 +148,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Seed for --subsample-num. Default: summarization.run.seed",
+    )
+    # Not config-backed, unlike every flag above: whether to resume is a fact
+    # about one invocation, not a property of the run being reproduced.
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append to the output path, skipping plans already written.",
     )
     return parser.parse_args()
 
@@ -215,6 +236,68 @@ def render_exemplars(level: AbstractionLevel) -> str:
     return "\n".join("- %s" % exemplar for exemplar in level.exemplars)
 
 
+# Decorations stripped when turning an operator or parameter name into words.
+LABEL_PREFIXES = ("apply_", "introduce_")
+LABEL_SUFFIXES = ("_effect", "_filter", "_tool")
+# Unit suffixes dropped from a parameter label, because the rendered value
+# already carries the unit: "cutoff frequency  56 Hz", not "cutoff frequency hz".
+UNIT_SUFFIXES = ("_hz", "_db", "_ms", "_seconds")
+
+
+def readable_label(name: str) -> str:
+    """An operator or parameter name as words: `apply_highpass_filter` -> `high pass`."""
+    text = name
+    for prefix in LABEL_PREFIXES:
+        text = text.removeprefix(prefix)
+    for suffix in LABEL_SUFFIXES + UNIT_SUFFIXES:
+        text = text.removesuffix(suffix)
+    return text.replace("_", " ").strip()
+
+
+def render_chain_summary(profile: ChainProfile) -> str:
+    """Describe the chain for a writer, not for a parser.
+
+    Level 0 used to be handed the symbolic graph verbatim, so it was shown
+    `separate_audio(audio, description="bass") -> target_stem` and asked to
+    describe it. It duly wrote out the function names, the wire names and the
+    full-precision floats, which is not what a producer would say. This renders
+    the same chain with operator and parameter names as words, values at
+    display precision, and no wiring: the stem is named once, and the
+    separation and remix that bracket every plan are left out because they are
+    how the pipeline applies an edit rather than part of the edit.
+    """
+    lines: list[str] = []
+    stems = [stem for stem in profile.stem_names]
+    lines.append("On the %s:" % stems[0] if stems else "On the full mix:")
+
+    by_step: dict[str, list[ParamDescriptor]] = {}
+    for descriptor in (*profile.descriptors, *profile.unbanded):
+        if descriptor.operator in STRUCTURAL_OPERATORS:
+            continue
+        by_step.setdefault(descriptor.label, []).append(descriptor)
+
+    for label, descriptors in by_step.items():
+        operator = readable_label(descriptors[0].operator)
+        if operator == "send return":
+            continue
+        # A parameter whose name repeats the operator's adds nothing:
+        # `apply_gain.gain_db` should read "gain -6.2 dB", not "gain: gain".
+        settings = ", ".join(
+            d.display if readable_label(d.param) == operator
+            else "%s %s" % (readable_label(d.param), d.display)
+            for d in descriptors
+        )
+        lines.append("  %s: %s" % (operator, settings) if settings else "  %s" % operator)
+
+    routing = [d for d in profile.descriptors if d.operator == "send_return"]
+    if routing:
+        lines.append(
+            "  routed to an aux send (%s), rather than placed in line"
+            % ", ".join("%s %s" % (readable_label(d.param), d.display) for d in routing)
+        )
+    return "\n".join(lines)
+
+
 def render_descriptors(profile: ChainProfile) -> str:
     """Render the band descriptors for a chain as prompt context.
 
@@ -269,9 +352,9 @@ def build_level_prompt(
     if level.from_graph:
         sections.append(
             "Write the instruction a professional audio producer would give to "
-            "recreate the following edit graph exactly."
+            "produce exactly this chain."
         )
-        sections.append("Edit graph:\n%s" % source_text)
+        sections.append("The chain:\n%s" % source_text)
     else:
         sections.append(
             "Rewrite the following music production instruction at a new level of "
@@ -370,7 +453,10 @@ def build_prompt_chain(
     """
     settings = model if model is not None else default_model_settings(config_dir)
     profile = reader.profile(record.get("graph_spec") or [])
-    graph_description = str(record.get("graph_description", ""))
+    # Not `record["graph_description"]`: that is the symbolic rendering, and
+    # handing it to level 0 is what put function names and wire names into the
+    # prompts.
+    graph_description = render_chain_summary(profile)
 
     texts: dict[int, str] = {}
     entries: list[dict[str, Any]] = []
@@ -456,6 +542,42 @@ def safe_build_prompt_chain(
     return index, result
 
 
+def row_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+    """`(clip_id, plan_id)` -- the key a resumed run matches on.
+
+    Reads the same off an input plan and a generated prompt row, since
+    `build_prompt_chain` carries both ids through to its output unchanged.
+    """
+    return str(row.get("clip_id")), str(row.get("plan_id"))
+
+
+def load_completed(output_path: Path) -> set[tuple[str, str]]:
+    """Plans already in the output file, keyed by clip and plan.
+
+    Every line is a finished chain, because a plan whose generation raised is
+    logged and skipped rather than written. That is deliberate: an error row in
+    a prompt file would sail past the format sniff in
+    `filter_ground_truth_prompts.py`, which samples only the first row, and a
+    row with no levels to judge is scored as a clean accept. So a failed plan
+    is simply absent, and absence is what a resumed run picks up.
+    """
+    done: set[tuple[str, str]] = set()
+    if not output_path.exists():
+        return done
+    with output_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A run killed mid-write can leave a truncated final line.
+                continue
+            done.add(row_identity(row))
+    return done
+
+
 def parse_levels(raw: str) -> tuple[int, ...]:
     if not raw.strip():
         return ()
@@ -518,24 +640,92 @@ def main() -> None:
     if config.subsample_num > 0:
         data = random.Random(config.seed).sample(data, config.subsample_num)
 
-    jobs = [(index, row) for index, row in enumerate(data)]
+    done = load_completed(config.output_path) if args.resume else set()
+    jobs = [
+        (index, row)
+        for index, row in enumerate(data)
+        if row_identity(row) not in done
+    ]
+    if args.resume:
+        log_event(
+            "%d plan(s), %d already done, %d to generate" % (
+                len(data),
+                len(data) - len(jobs),
+                len(jobs)
+            )
+        )
 
+    # Appending is what makes a resumed run additive. A run without --resume
+    # truncates instead, so a plain rerun is not silently concatenated onto the
+    # rows of the previous one.
+    mode = "a" if args.resume and config.output_path.exists() else "w"
+    config.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    failed = 0
     # One prompt per level per plan. Counting finished levels rather than
     # finished plans keeps the bar moving while a long chain is still running,
-    # and is independent of the order `executor.map` happens to yield in.
+    # and is independent of the order results arrive in. A plan that raises
+    # part-way through its chain leaves the rest of its levels uncounted, so the
+    # bar can stop short of its total; the tally logged afterwards says why.
     with tqdm(
         total=len(jobs) * len(levels),
         desc="Generating prompts",
         unit="prompt",
     ) as bar:
         WORKER_ON_PROMPT = ProgressCounter(bar)
-        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-            ordered_results = sorted(
-                executor.map(safe_build_prompt_chain, jobs),
-                key=lambda item: item[0],
-            )
+        # A single writer on the main thread. Appending from the pool workers
+        # would interleave partial lines and corrupt the file resume reads back.
+        with config.output_path.open(mode, encoding="utf-8") as sink:
+            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+                futures = {
+                    executor.submit(safe_build_prompt_chain, job): job
+                    for job in jobs
+                }
+                # Each chain is written as it lands rather than held until the
+                # pool drains. Buffering meant a run that died late lost every
+                # plan it had already finished, and one unhandled error took the
+                # whole job with it -- both of which get likelier as
+                # max_workers goes up. The cost is that rows are in completion
+                # order, not input order; each carries its own clip and plan id.
+                try:
+                    for future in as_completed(futures):
+                        _, record = futures[future]
+                        try:
+                            _, result = future.result()
+                        except Exception as error:  # one bad plan should not end the run
+                            failed += 1
+                            clip_id, plan_id = row_identity(record)
+                            log_event(
+                                "FAILED clip %s plan %s -> %s: %s" % (
+                                    clip_id,
+                                    plan_id,
+                                    type(error).__name__,
+                                    error
+                                )
+                            )
+                            continue
+                        sink.write(json.dumps(result, sort_keys=True))
+                        sink.write("\n")
+                        sink.flush()
+                except KeyboardInterrupt:
+                    # The pool's own shutdown waits without cancelling, so
+                    # without this a Ctrl-C would sit through every plan still
+                    # queued before the interrupt was allowed through. Rows
+                    # already written are flushed to disk, so dropping the
+                    # backlog costs only the chains in flight right now.
+                    log_event("interrupted -- rerun with --resume to continue")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
 
-    write_jsonl(config.output_path, (result for _, result in ordered_results))
+    log_event(
+        "wrote %d plan(s) to %s, %d failed" % (
+            len(jobs) - failed,
+            config.output_path,
+            failed
+        )
+    )
+    if failed:
+        log_event("rerun with --resume to retry the %d failed plan(s)." % failed)
 
 
 if __name__ == "__main__":

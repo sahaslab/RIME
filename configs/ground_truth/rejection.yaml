@@ -69,12 +69,29 @@ rejection:
     timeout_s: 120
 
   paths:
+    # The prompt artifact from scripts/generate_ground_truth_prompts.py. Its
+    # `prompt_levels` entries are what this stage judges, and their `text` is
+    # exactly `prompt_variants` ordered by level -- the entries just carry the
+    # rubric and constraints beside the same text.
+    #
+    # Agent input from scripts/generate_agent_input.py is also accepted; the
+    # format is detected, not configured. It was briefly the default while this
+    # stage also computed the MERT similarity and needed the audio paths agent
+    # input carries. The similarity now lives in its own scripts, so the prompt
+    # file is the natural input again.
     prompts: derived/ground_truth/subsampled_prompts.jsonl
     # Re-join source. The plan row flattens the clip's `analysis` down to
     # genres/mood_themes/issues plus a flat `caption`, dropping `aspect_list`,
     # `instrument_tags` and `tempo_bpm`. The stylistic criterion needs the
     # first, and the delay-beats inversion needs the last.
     analysis: derived/ground_truth/mtg_jamendo_analysis_manifest.jsonl
+    # The MusicCaps captions CSV, keyed by ytid. REQUIRED for the stylistic
+    # criterion to read real prose: `caption` arrives null in every prompt row,
+    # and the `aspect_list` that survives is the mined phrase set with the
+    # production language stripped out. Without this the judge sees
+    # "slide guitar, blues, guitar layers" where the caption said "a distant
+    # filtered vocal hum ... from another room" -- and `distant` is a space cue.
+    captions: /dartfs/rc/lab/S/SinghN/shared/musiccaps/musiccaps_captions.csv
     output: derived/ground_truth/rejection_report.jsonl
     # Rows needing a human. Optional; unset means they stay only in `output`.
     review: derived/ground_truth/rejection_review.jsonl
@@ -84,6 +101,10 @@ rejection:
     # sidecar regardless, because that is what --resume reads back and learning
     # which rows are done should not mean re-parsing every prompt record.
     full_manifest: derived/ground_truth/rejection_full_manifest.jsonl
+    # --report-path writes here: one flat row per record carrying
+    # prompt_variants, the ids, and one column per flag. The lean artifact for
+    # analysis, where `output` above is the nested audit trail.
+    report: derived/ground_truth/rejection_report_flat.jsonl
 
   run:
     # Attempts per judge call before recording an unparseable verdict.
@@ -94,13 +115,17 @@ rejection:
     subsample_num: -1
     seed: 0
 
-  # MERT embedding similarity between the original and the edited audio, for
-  # --include-mert. Computed by scripts/calculate_ground_truth_similarity.py,
-  # which the filter calls; it can also be run standalone on a GPU node first,
-  # in which case the filter just reads `similarity_path`.
+  # MERT embedding similarity between the original and the edited audio.
   #
-  # This is the one criterion that needs audio rather than symbols, and the only
-  # one that can catch an edit too subtle to hear. No rule check can.
+  # NOT read by the judge. This stage evaluates symbolic criteria only; the
+  # similarity is computed by scripts/mert_similarity_report.py and
+  # scripts/calculate_ground_truth_similarity.py, which read this block through
+  # `load_rejection_config(config_dir).mert`. It lives here because this is the
+  # ground-truth config directory those scripts already load, not because the
+  # filter uses it -- move it to its own file if that proves confusing.
+  #
+  # It remains the one criterion that needs audio rather than symbols, and the
+  # only one that can catch an edit too subtle to hear. No rule check can.
   mert_similarity:
     # `fadtk` size string. The loader, processor, 24kHz resampling and 6-minute
     # truncation all come from fadtk.MERTModel, which is already installed in
@@ -149,15 +174,50 @@ rejection:
     # re-thresholding never re-runs MERT.
     similarity_threshold: null
 
+  # An instruction that names `separate_audio`, writes
+  # `apply_reverb_effect(room_size=0.9)` or carries a `->` out of the graph is
+  # describing the implementation rather than asking for a sound. Measured on
+  # 1000 rows of the MusicCaps artifact, 28% of rows leak something, almost all
+  # at AL0 -- including texts that are the graph_description pasted verbatim.
+  #
+  # Deterministic, so it costs no judge call. The identifiers are DERIVED from
+  # operators.yaml and each row's own graph_spec rather than listed here, so a
+  # new operator or a renamed motif step is covered without an edit. Only
+  # underscore-bearing identifiers are matched: `drums` and `reverb` are what a
+  # person would say, `apply_reverb_effect` and `room_size` are not.
+  implementation_leak:
+    # Syntax that is never human phrasing, whatever the graph contains.
+    syntax_patterns:
+      # A graph arrow, as in `-> target_stem, residual`.
+      - '->'
+      # Call syntax with a keyword argument, as in `apply_gain(gain_db=-6.1)`.
+      - '\w+\([A-Za-z_]+\s*='
+    # Identifiers to never flag even though they carry an underscore. Empty for
+    # now; add one here rather than weakening the derivation if a legitimate
+    # phrase collides.
+    allow: []
+
   # Which verdicts reject.
   reject_policy:
     al_rules: [fail]
     al_consistency: [fail]
+    # Which KINDS of consistency failure disqualify a row. The verdict stays an
+    # honest "does it describe the source correctly"; this decides which sort of
+    # wrongness is fatal.
+    #
+    # Wrong interpretation and hallucination both mean the instruction describes
+    # audio the graph will not produce, which is the one thing a training pair
+    # cannot survive. Omission is recorded but does not reject by default: at
+    # high abstraction, dropping a processor is often the difference between a
+    # terse instruction and a complete one rather than a falsehood. Pass
+    # --omission-reject to treat it as fatal too.
+    al_consistency_failures: [wrong_interpretation, hallucination]
     joint_params: [implausible]
     stylistic: [inappropriate]
-    # Inert while mert_similarity.similarity_threshold is null, because the flag
-    # carries no verdict until a threshold exists to compare against.
-    similarity: [too_similar]
+    # A prompt carrying graph syntax is unusable as training text whatever else
+    # is right about it, so this one does reject. Empty the list to demote it to
+    # a reported-only signal.
+    implementation_leak: [leaked]
     # What to do with a verdict not named above: keep | reject | review.
     # Rejecting `unclear` is the tempting default and the wrong one: it biases
     # the corpus against unusual-but-valid edits, and collapsing edit diversity
@@ -167,7 +227,7 @@ rejection:
       default: keep
       joint_params: keep
       stylistic: review
-      similarity: keep
+      implementation_leak: keep
     # A row whose judge call never returned parseable JSON is never silently
     # accepted.
     on_judge_error: review
@@ -187,38 +247,54 @@ rejection:
   # pairwise rules: it is those declarations, glossed into judgeable words. A
   # new level added to the ladder is covered the moment its constraint values
   # appear here.
+  # What each level is LICENSED to discard, and what it remains obliged to
+  # carry. Phrased in the failure vocabulary the judge reports in, so the two
+  # cannot drift apart.
+  #
+  # This is what makes omission answerable. AL2 is supposed to drop every
+  # parameter value; without this block a judge asked "did it leave anything
+  # out" would fail every correctly-written level. The levels already declare
+  # their own contract in abstraction_levels.yaml and every prompt row carries
+  # it, so these are those declarations glossed into obligations -- a new level
+  # is covered as soon as its constraint values appear here.
   constraint_glosses:
-    effect_name:
-      preserve: >-
-        Every effect named in the source must stay identifiable in the rewrite,
-        either by its usual name or by a common word for what it does. None may
-        be dropped and none may be invented.
-      incidental: >-
-        Naming an effect is permitted but not required. Dropping an effect name
-        is NOT an inconsistency at this level. Inventing processing the source
-        does not describe still is.
     parameter_values:
       exact: >-
-        Every value from the graph appears in the text, with its unit.
+        Every value from the graph must appear, with its unit. A value that is
+        absent is an omission; one that is present but different is a wrong
+        interpretation.
       banded: >-
-        Every numeric value in the source must be replaced by a magnitude
-        descriptor that lands in the same band. No numerals and no units may
-        survive. A descriptor landing in a different band than the source's
-        value is an inconsistency; a descriptor using different words than the
-        suggested ones is not.
+        Numerals and units must be gone -- discarding them is licensed and is
+        never an omission. What must survive is the MAGNITUDE: a descriptor
+        landing in a different band than the source's value is a wrong
+        interpretation, because a reader would expect the wrong amount. Using
+        different words than the suggested ones is not a failure of any kind.
       omit: >-
-        Numeric values are dropped entirely. Only the overall magnitude of the
-        chain survives, in words.
+        Numeric values are dropped entirely and so is per-parameter detail;
+        both are licensed. Only the chain's overall magnitude must survive, and
+        getting that magnitude wrong is a wrong interpretation.
+    effect_name:
+      preserve: >-
+        Every effect in the source must stay identifiable, by its usual name or
+        by a common word for what it does. An effect that has vanished is an
+        omission; an effect that appears here but not in the source is a
+        hallucination.
+      incidental: >-
+        Naming an effect is licensed but not required, so dropping a name is
+        never an omission. Describing processing the source does not contain is
+        still a hallucination.
     operator_order:
       preserve: >-
-        The rewrite lists the processors in the same order as the source.
+        The processors must be described in the source's order; a different
+        order is a wrong interpretation.
       free: >-
-        Reordering is permitted and is not an inconsistency.
+        Reordering is licensed and is never a failure of any kind.
     focus:
       chain_character: >-
-        The rewrite describes the combined result of the whole chain rather than
-        its individual processors. Enumerating processors is a consistency
-        failure at this level, not a virtue.
+        The rewrite describes the combined result rather than the individual
+        processors, and dropping the per-processor detail is licensed.
+        Enumerating processors is a failure of this level's own rubric, not of
+        fidelity -- report it under al_rules, not as a consistency failure.
 
   # Lexical gate for the stylistic criterion. Matched as whole words against the
   # caption and the re-joined aspect_list.
@@ -263,11 +339,12 @@ rejection:
         You are auditing one instruction written for a music-editing dataset.
         You are given the symbolic edit graph it describes, the instruction one
         level of abstraction below it, the rules that instruction was written
-        under, and the contract governing what it was allowed to change. You
-        decide two things and nothing else: whether the instruction obeys its
-        own rules, and whether it is consistent with the instruction it was
-        derived from. You are strict about the contract and indifferent to
-        style. You do not rewrite anything.
+        under, and what this level is licensed to discard. You decide two
+        things and nothing else. First, whether the instruction obeys its own
+        rules. Second, and separately, whether it correctly describes the
+        instruction it was derived from -- the same edit, at less precision,
+        still truthfully. You are indifferent to style. You do not rewrite
+        anything.
       rules:
         - >-
           Judge the instruction only against the rules and contract supplied.
@@ -282,30 +359,79 @@ rejection:
           words in the right band are correct, and the suggested words in the
           wrong band are not.
         - >-
-          Cite failures by the index of the rubric item or by the name of the
-          constraint violated. An unattributable failure is not a failure.
+          For consistency, judge fidelity to the source, not conformance to a
+          contract. Ask only whether a reader of the rewrite would come away
+          with a true picture of the edit the source describes. Classify each
+          way it fails:
+        - >-
+          wrong_interpretation -- the element IS in the source but the rewrite
+          describes it incorrectly: a cut described as a boost, a large space
+          described as subtle, the wrong stem, one processor mistaken for
+          another. The information is present and wrong. Calling a reverb a
+          delay is this, not hallucination.
+        - >-
+          hallucination -- the rewrite describes processing, a parameter or a
+          target that is not in the source at all. Something is ADDED while the
+          rest stays intact.
+        - >-
+          omission -- something the level was obliged to keep is missing. Being
+          less detailed than the source is NOT omission where the licence above
+          permits it; that is the abstraction working as intended.
+        - >-
+          A rewrite can fail in more than one way, so list every kind that
+          applies. An empty list means it describes the source correctly.
+        - >-
+          Do not report the same defect under both verdicts. `al_rules` grades
+          the text against its own level's rubric; consistency grades it
+          against the source. A missing operator can be either or both, but say
+          so once under each only if it genuinely fails both tests.
+        - >-
+          Cite rule failures by the index of the rubric item. An unattributable
+          failure is not a failure.
         - >-
           Mechanical checks have already run separately. Judge only what they
           cannot settle.
+        - >-
+          Give each failing verdict exactly one sentence of justification,
+          naming the rubric item or contract term it breaks. The two verdicts
+          get their own sentence each: they answer different questions and can
+          disagree, so one sentence covering both explains neither. A passing
+          verdict needs none.
       exemplars:
         - verdict: pass
           note: >-
             AL1 "Give the guitar a subtle wash of reverb and a slow, deep
             swirl" against an AL0 naming a 0.25 room-size reverb and a 0.35 Hz,
-            0.65-depth chorus. Both descriptors land in their bands, both
-            effects survive, no numbers leak, and reordering is permitted.
+            0.65-depth chorus. Every element survives, described truthfully and
+            at the right strength. The numbers are gone, which this level is
+            licensed to discard, so that is not an omission.
         - verdict: fail
           note: >-
-            AL1 "Add a cavernous reverb to the vocal" against an AL0 naming a
-            0.25 room size. The effect survives but the descriptor is three
-            bands too large, so al_consistency fails on parameter_values while
-            al_rules passes.
+            wrong_interpretation. AL1 "Add a cavernous reverb to the vocal"
+            against an AL0 naming a 0.25 room size. The reverb is really there,
+            so nothing is invented and nothing is missing -- it is simply
+            described as three bands larger than it is, and a reader would
+            expect the wrong sound.
         - verdict: fail
           note: >-
-            AL2 "Compress the drums, then saturate them, then bring the bus
-            back up" against an AL1 describing a parallel drum bus. Accurate,
-            but it enumerates processors where the contract's focus is
-            chain_character, so al_rules fails on that rubric item.
+            hallucination. AL1 "Put the drums through a parallel bus with heavy
+            compression and obvious grit" against a graph whose only processor
+            is distortion. The grit is faithful; the bus and the compressor
+            were invented, and no amount of abstraction introduces a processor
+            that was not there.
+        - verdict: fail
+          note: >-
+            omission. AL1 "Bring the vocal up" against an AL0 describing a gain
+            lift AND a de-esser. The gain is right, nothing is invented, but a
+            whole processor the level was obliged to keep has vanished. Had the
+            same text dropped only the dB figure, that would be licensed and
+            not an omission.
+        - verdict: fail
+          note: >-
+            Two at once. AL2 "Wash the guitar in a huge echoing hall" against
+            an AL1 describing a short slapback delay and no reverb: the delay
+            is mis-described as a hall (wrong_interpretation) and the hall
+            itself is not in the source (hallucination).
       response_schema:
         al_rules: {verdict: "pass|fail", failed_rubric_items: "[int]"}
         al_consistency: {verdict: "pass|fail", violated_constraints: "[str]"}
@@ -350,6 +476,10 @@ rejection:
         - >-
           Answer unclear when the rule fired but the audible result genuinely
           depends on material you cannot hear.
+        - >-
+          Give exactly one sentence of justification, naming the interaction and
+          what it does to the sound. It is read next to the verdict in a table,
+          so a paragraph is worse than a sentence.
       rules_detail:
         - id: mod_rate_vs_depth
           statement: >-
@@ -465,6 +595,10 @@ rejection:
         - >-
           The caption describes the clip; it does not inventory it. Something
           the caption fails to mention is not thereby absent.
+        - >-
+          Give exactly one sentence of justification, quoting the words from the
+          description you relied on. It is read next to the verdict in a table,
+          so a paragraph is worse than a sentence.
       axis_rules:
         - id: space_vs_dry_caption
           statement: >-
@@ -473,11 +607,18 @@ rejection:
             describing the absence of exactly that. A large space brought up to
             an audible level contradicts it.
           source: "MusicRadar -- The Ultimate Guide To Effects: Reverb; Sound on Sound -- Effects"
-          # `room_size` x `return_level`, NOT wet_level: every motif pins the
-          # reverb fully wet and lets the enclosing send set how much is heard,
-          # so wet_level carries no magnitude at all. return_level's own hint in
-          # param_bands calls it "the single strongest cue for how audible the
-          # effect is".
+          # `room_size` x `return_level`. return_level's own hint in param_bands
+          # calls it "the single strongest cue for how audible the effect is",
+          # and it is still the strongest SINGLE cue -- but it is no longer the
+          # only one. The fitted priors gave the reverb its own wet/dry blend
+          # (wet_level 0.3-0.8, dry_level 0.5-1.0) on top of the send levels, so
+          # how loud the effect really is now multiplies send_level, the
+          # reverb's own wet_level, and return_level.
+          #
+          # Left as a single-cue gate on purpose: a trigger decides whether to
+          # spend a judge call, not what the verdict is, so it is meant to be
+          # slightly over-inclusive. Adding the other factors to this `all`
+          # would make it stricter and start missing real cases.
           trigger:
             all:
               - eq: {path: caption.dry, value: true}
@@ -510,16 +651,19 @@ rejection:
             rather than a stereo reverb, because a wide stereo return smears the
             position the source occupied.
           source: "Sound on Sound -- Effects: All You Need To Know (And A Little Bit More)"
-          # The plan side of this trigger is VACUOUS and the reachability report
-          # will say so: `width` is pinned to 1.0 by every motif, so every
-          # reverb this pipeline emits is maximally wide. What remains is a
-          # caption test -- a mono clip receiving any reverb at all. Kept
-          # because it is still a real mismatch, but do not read a fired trigger
-          # as evidence about the width value.
+          # This trigger used to be vacuous, because every motif pinned `width`
+          # to 1.0 and so every reverb was maximally wide. The fitted priors now
+          # sample it over 0.5-1.0, so the leaf discriminates: a reverb at 0.55
+          # is genuinely narrower than one at 1.0, and only the wide end
+          # actually smears a mono source's position.
           trigger:
             all:
               - eq: {path: caption.mono, value: true}
-              - gte: {path: params.max.apply_reverb_effect.width, value: 1.0}
+              # 0.84 is the bottom edge of width's top band, the "wide,
+              # full-width" one. Not 1.0: a continuous uniform never lands
+              # exactly on its endpoint, so that threshold could never fire --
+              # which is what the reachability report reported it as.
+              - gte: {path: params.max.apply_reverb_effect.width, value: 0.84}
           suggests: inappropriate
 
         - id: density_vs_dense_caption
@@ -687,11 +831,13 @@ rejection:
           source: "MusicRadar -- The Ultimate Guide To Modulation Effects"
           periods: [seventies, eighties]
           genres: [rock]
-          # There is no flanger operator. Note, though, that the chorus motif
-          # pins centre_delay_ms to 7.0, which by the delay times above is
-          # flanger territory rather than chorus territory -- an upstream
-          # question about motifs.yaml, deliberately not something this filter
-          # tries to settle.
+          # There is no flanger operator, so this cannot fire.
+          #
+          # It used to be worth noting that the chorus motif pinned
+          # centre_delay_ms to 7.0, which by the delay times above is flanger
+          # territory rather than chorus territory. The fitted priors fixed
+          # that: centre_delay_ms now samples 20-50 ms, exactly the chorus range
+          # the source gives. A chorus plan is now really a chorus.
           detect:
             contains_any: {path: profile.operators, values: [apply_flanger_effect]}
 

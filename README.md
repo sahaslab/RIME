@@ -13,7 +13,9 @@ The ground-truth stack is now split into four symbolic stages:
 4. `scripts/plan_coverage.py`
    Permissible plans -> coverage and distribution report
 5. `scripts/filter_ground_truth_prompts.py`
-   Generated prompts -> per-row rejection verdicts
+   Generated prompts -> per-row rejection verdicts (symbolic criteria)
+6. `scripts/mert_similarity_report.py`
+   Rendered audio -> MERT similarity and corpus percentile
 
 The planner does not use `request.intent`. It emits every recipe that is allowed
 for a clip by the YAML rules, heuristics, and metadata constraints.
@@ -175,6 +177,7 @@ Important arguments:
 
 ```bash
 python scripts/generate_ground_truth_prompts.py
+python scripts/generate_ground_truth_prompts.py --resume
 ```
 
 Model and run settings come from
@@ -185,8 +188,8 @@ needs `boto3` installed plus either a Bedrock API key in
 `AWS_BEARER_TOKEN_BEDROCK` or credentials on the standard AWS chain (environment
 variables, a `.env` file, a named profile, or an instance role).
 
-Every flag below is an override: pass one and it wins, leave it out and the
-value comes from `summarization.yaml`.
+Every flag below except `--resume` is an override: pass one and it wins, leave
+it out and the value comes from `summarization.yaml`.
 
 - `--plans-path` / `--output-path`
   Default: `summarization.paths.plans` / `summarization.paths.output`
@@ -208,6 +211,22 @@ value comes from `summarization.yaml`.
 - `--subsample-num` / `--seed`
   Random sample size for smoke tests and the seed that makes it repeatable.
   Default: `summarization.run.subsample_num` / `summarization.run.seed`
+- `--resume`
+  Append to the output file, skipping plans already written. Not an override:
+  it describes one invocation rather than the run being reproduced, so it has
+  no entry in `summarization.yaml`. Pass the same `--subsample-num` / `--seed`
+  as the run being continued, or the resumed run draws a different sample and
+  the plans it skips will not be the ones already on disk.
+
+Each chain is written as soon as it finishes, so a run killed part-way keeps
+every plan it had completed and `--resume` generates only the rest. Two
+consequences worth knowing. Rows are in completion order rather than input
+order, which is why each one carries its own `clip_id` and `plan_id`; sort on
+those if a consumer needs a stable order. And a plan whose generation raises is
+logged and skipped rather than written, so the failure never enters the prompt
+file -- `filter_ground_truth_prompts.py` sniffs only the first row for format,
+and a row with no levels to judge would otherwise be scored as a clean accept.
+A resumed run retries those skipped plans.
 
 The number of rewrites per graph is set by the ladder in
 [configs/ground_truth/abstraction_levels.yaml](configs/ground_truth/abstraction_levels.yaml),
@@ -226,13 +245,75 @@ python scripts/filter_ground_truth_prompts.py --resume
 ```
 
 Reads the prompt artifact and raises four flags per row, writing verdicts to a
-new file. The input is never modified, because `generate_agent_input.py` and the
+new file. Symbolic criteria only — the embedding-space similarity is stage 8.
+
+Each abstraction level gets **two independent statuses**, never combined:
+
+| | |
+| --- | --- |
+| `mechanical` | `AbstractionLadder.check` re-run against the current config |
+| `judged` | the judge's verdict on that level's `checks.rubric` |
+
+`reject_policy` keys off `judged` alone. Folding a mechanical failure into
+`al_rules` would have rejected 98.8% of the MusicCaps corpus for reasons about
+the generator and the checker rather than about the plan, so the mechanical
+status is reported and never rejects.
+
+The checks are **re-run** rather than read from the row. The stored
+`violations` were computed by whatever checker existed at generation time, and
+before the `_value_renderings` fix that checker could not match a
+full-precision float — so on any artifact generated earlier, half the recorded
+AL0 failures are wrong. Re-running repairs them without regenerating.
+
+Every judged level is judged regardless of its mechanical status. A `judged`
+column that were null wherever the checks failed would carry no information,
+and comparing the two is the point of keeping them apart.
+
+**AL1 and AL2 are judged by default; AL0 is not.** AL0 is the verbatim
+transcription of the graph, so its rubric — "every operator is named",
+"operator order matches" — is close to what the mechanical checks already
+settle, and it is a third of the calls for the least interesting level. The
+abstraction proper is AL1 and AL2. Pass `--include_al_0` to judge it too.
+
+Skipping AL0 costs none of the free signal: its mechanical status and its
+leakage are still checked and reported, which matters because AL0 is where
+almost all the leakage is. What it drops is AL0's rubric verdict and the
+`graph->0` consistency pair; `0->1` survives, since that pair reads AL0's
+*text*, not its verdict.
+
+Budget accordingly: two calls per row by default, three with `--include_al_0`. The input is never modified, because `generate_agent_input.py` and the
 prompt lab both read `prompt_variants` and `prompt_levels` out of it.
+
+### Input
+
+Agent input, from `scripts/generate_agent_input.py`, is the default. It is the
+only artifact carrying **both** halves this stage needs: the prompt file has no
+audio paths, and the render manifest has no prompts. So `--include-mert` needs
+nothing else.
+
+A bare prompt file from `generate_ground_truth_prompts.py` also works — the
+format is detected, not configured — but then the similarity criterion needs a
+`render_manifest` to find the audio. Either way the run logs which format it
+read, and an input that is neither is refused rather than evaluated: a row with
+no recognizable prompt has no levels to judge and no graph to trigger on, so
+every criterion would return its default and the whole run would look like a
+clean accept.
+
+One caveat on the reference audio. Agent input's `input_audio` is the untouched
+source, so a similarity computed from it measures the edit *plus* Demucs
+separation loss. The no-FX baseline that isolates the effects chain exists only
+in the render manifest, so supplying `--render-manifest` alongside agent input
+upgrades the reference where a baseline was rendered. In poisoning mode agent
+input sets `input_audio` to the *degraded* audio and moves the clean original to
+`metadata.original_clean_audio`; the clean original is preferred there, because
+comparing against the degraded version would measure repair fidelity rather than
+edit strength.
 
 | flag | output | question |
 | --- | --- | --- |
 | `al_rules` | binary | Does each level satisfy its own rules? |
-| `al_consistency` | binary | Is AL1 consistent with AL0, AL2 with AL1? |
+| `implementation_leak` | `clean` / `leaked` | Does the text name a Python function or graph syntax? |
+| `al_consistency` | binary + failure kinds | Does each level describe the one below it correctly? |
 | `joint_params` | plausible / implausible / unclear | Are co-sampled parameters jointly coherent? |
 | `stylistic` | appropriate / inappropriate / unclear | Does the edit suit the captioned music? |
 
@@ -262,6 +343,55 @@ budget. Because those checks read the current `param_bands.yaml`, the stage
 refuses to run when a row's `abstraction_version` does not match the loaded
 ladder, so a config edit since generation cannot masquerade as a rejection.
 
+### Consistency Is Fidelity
+
+`al_consistency` asks one question: **does this level describe the level below
+it correctly?** Not whether it obeys the ladder's abstraction contract — that
+is `al_rules`, judged against each level's own `checks.rubric`. A rewrite can be
+abstracted perfectly and still be about a different edit, and that is what this
+flag exists to catch.
+
+The verdict is binary, and a failure also names its kind:
+
+| failure | meaning |
+| --- | --- |
+| `wrong_interpretation` | the source is described, but wrongly — a value landing in the wrong band, an effect misnamed, the order inverted where order is preserved |
+| `hallucination` | processing appears that the source does not contain |
+| `omission` | something the level was obliged to carry is missing |
+
+`wrong_interpretation` and `hallucination` reject: both mean the instruction
+describes audio the graph will not produce, which is the one thing a training
+pair cannot survive. `omission` does not reject by default — at high
+abstraction a dropped processor is usually the difference between a terse
+instruction and a complete one rather than a falsehood. `--omission-reject`
+makes it fatal too, additively, so it means "and omission as well" whatever
+`reject_policy.al_consistency_failures` already lists.
+
+The verdict list and the failure list do different jobs, which is worth knowing
+when reading a report. `al_consistency: [fail]` decides whether the judge's
+sentence is printed; `al_consistency_failures` decides whether the row is
+thrown away. So an omission-only row is `fail`, carries both its
+`al_consistency_failures` and its `al_consistency_why`, and is still accepted —
+a recorded failure nobody can read would not be a record of anything.
+
+**What makes omission answerable.** AL2 is supposed to drop every parameter
+value, so a judge asked "was anything left out" with no further context would
+fail every correctly-written level. Each prompt therefore opens with a `WHAT
+THIS LEVEL IS LICENSED TO DISCARD` block, built from the level's own
+`constraints` glossed through `constraint_glosses`, closing with "Discarding any
+of the above is correct and is never an omission." Omission then means only:
+dropping something the level was obliged to keep.
+
+The glosses are phrased in the same three words the judge answers in, so the
+licence and the verdict cannot drift apart — `parameter_values: banded` says
+that losing the numerals is licensed while landing in the wrong band is a
+`wrong_interpretation`. Nothing is written pairwise, so a new abstraction level
+is covered as soon as its constraint values appear in that table.
+
+One boundary is fixed in the rules rather than left to the judge: misnaming an
+effect the source does contain is `wrong_interpretation`, not `hallucination`.
+Hallucination means added processing, not a wrong label on existing processing.
+
 ### Reachability
 
 ```bash
@@ -287,6 +417,93 @@ be *placed*: five declared operators are referenced by neither.
 Since the repo has no test suite, `--reachability` and `--dry-run` are the test
 surface: both are deterministic, call no model, and are meant to be diffed.
 
+### Flat Report
+
+```bash
+python scripts/filter_ground_truth_prompts.py --report
+python scripts/filter_ground_truth_prompts.py --report-path out.jsonl
+```
+
+One flat row per record at `paths.report` — the prompts, their ids, and one
+column per flag:
+
+```json
+{"clip_id": "m7i4g_o-znQ", "plan_id": "hum_cleanup.001",
+ "caption": "slide guitar blues country blues intricate acoustic guitar playing...",
+ "graph_description": "hum_cleanup: audio -> apply_highpass_filter(cutoff_frequency_hz=55.63) -> final_audio",
+ "prompt_variants": ["Apply a high-pass filter to the hum_cleanup stem...", "...", "..."],
+ "al_rules": "pass", "al_consistency": "fail",
+ "al_consistency_failures": ["hallucination"],
+ "al_consistency_why": "0->1: AL1 adds a parallel compression bus the graph does not contain.",
+ "joint_params": "plausible", "stylistic": "appropriate",
+ "implementation_leak": "leaked", "implementation_leak_levels": ["0"],
+ "implementation_leak_tokens": ["hum_cleanup"],
+ "disposition": "reject", "reject_reasons": ["implementation_leak"]}
+```
+
+`caption` is what the stylistic criterion actually read, so a verdict about the
+music can be checked against the description behind it. On the MusicCaps
+artifact the raw caption is null and this is the mined aspect phrases.
+
+`<flag>_why` carries the judge's one-sentence justification, and **only on a
+verdict that failed** — a reason attached to a pass is noise in a table nobody
+will read. Which verdicts count as failing comes from `reject_policy`, so adding
+`unclear` to a criterion's reject list makes its reasons appear too. Failing is
+not quite rejecting for `al_consistency`, whose failure kinds decide that
+separately; an omission-only row explains itself and is still accepted. Every
+criterion is instructed to give exactly one sentence, because "inappropriate"
+with no reason is not something anyone can act on or check.
+
+`al_rules` and `al_consistency` get their own sentence each rather than one
+shared: they answer different questions and can disagree. The failing level is
+named, so `al_rules_why` reads `1: The instruction never names the compressor`.
+The nested sidecar keeps every rationale, passing ones included.
+
+`prompt_variants` is carried verbatim because it is what was judged — it is
+exactly `[e["text"] for e in prompt_levels]` ordered by level, so a verdict can
+be read against its text without opening the input. `graph_description` is the
+rendered graph the judge was shown in its EDIT GRAPH block, so the prompts, the
+thing they describe and the verdict about them all sit in one row. The
+structured `graph_spec` is five times the size and lives in the full manifest.
+
+**Judged verdicts only.** The mechanical `checks.hard` results are deliberately
+absent: they are a regex's answer to a different question, and on this corpus
+they fail often enough to drown the verdicts this table exists to show. They are
+still computed and still written to the sidecar. `implementation_leak` is here
+despite also being deterministic, because it is a criterion in its own right
+rather than part of the ladder's hard checks.
+
+A flag with no verdict also writes a `<flag>_reason` column, so a null is never
+indistinguishable from a criterion that did not run.
+
+The nested sidecar at `paths.output` keeps the full audit trail — rationale,
+cited rules, per-level rubric indices — and is what `--resume` reads back.
+
+### Implementation Leakage
+
+An instruction that names `separate_audio`, writes
+`apply_reverb_effect(room_size=0.9)` or carries a `->` out of the graph is
+describing the implementation rather than asking for a sound. It is not usable
+as training text whatever else is right about it, so it gets its own flag —
+deterministic, costing no judge call.
+
+The identifiers are **derived**, not listed: every operator name, alias and
+parameter from `operators.yaml`, plus the step labels and stem handles
+(`target_stem`, `residual`, `hum_cleanup`) from each row's own `graph_spec`. A
+new operator or a renamed motif step is covered with no edit. Only
+underscore-bearing identifiers are matched — `drums` and `reverb` are what a
+person would say; `apply_reverb_effect` and `room_size` are not.
+
+Measured on 1000 rows of the MusicCaps artifact, **28% of rows leak**, almost
+entirely at AL0, including texts that are the `graph_description` pasted
+verbatim. The commonest tokens are `separate_audio`, `final_audio`,
+`processed_stem`, `target_stem` and `mix_stems`.
+
+This flag **does reject**, since such a row is unusable. Empty
+`reject_policy.implementation_leak` in `rejection.yaml` to demote it to a
+reported-only signal. `implementation_leak_tokens` names what leaked, which is
+the actionable part.
+
 ### Full Manifest
 
 ```bash
@@ -303,23 +520,49 @@ not mean re-parsing every prompt record.
 It is written under `--dry-run` too, since the manifest's shape is settled by the
 deterministic half and should be checkable without spending a judge call.
 
-### MERT Similarity
+### Running Without Captions
 
 ```bash
-sbatch scripts/run_calculate_similarity.sbatch                     # embed on a GPU node
-python scripts/filter_ground_truth_prompts.py --include-mert       # then join
+python scripts/filter_ground_truth_prompts.py --without-captions
 ```
 
-Adds a fifth `similarity` flag: the cosine distance in MERT embedding space
-between the original and the edited audio. This is the one criterion that needs
-audio rather than symbols, and the only one that can catch an edit too subtle to
-hear.
+Drops every criterion declaring `requires: [caption]`, for a corpus that has
+none — MTG-Jamendo, or the mock manifest. This is not cosmetic: without it the
+stylistic criterion reports `unclear` / `no_caption`, which routes through
+`reject_policy.unclear.stylistic: review` and sends **every** row to the review
+queue.
 
-[scripts/calculate_ground_truth_similarity.py](scripts/calculate_ground_truth_similarity.py)
-does the work and is runnable on its own; `--include-mert` makes the filter score
-any pair not already in `similarity_path`. Run the sbatch first for anything
-larger than a smoke test — the filter is an I/O-bound Bedrock job and embedding a
-corpus inside it wastes a GPU allocation on waiting for HTTP.
+The flag reads each criterion's own `requires`, so a caption-dependent criterion
+added later is covered without touching the flag, and the run logs which
+criteria it dropped and why.
+
+## 8. MERT Similarity
+
+```bash
+sbatch scripts/run_mert_similarity_report.sbatch                   # source vs render, one manifest
+sbatch scripts/run_calculate_similarity.sbatch                     # reference-resolving variant
+```
+
+The cosine distance in MERT embedding space between the original and the edited
+audio. This is the one criterion that needs audio rather than symbols, and the
+only one that can catch an edit too subtle to hear.
+
+**Deliberately separate from stage 7.** The judge is an I/O-bound job over text;
+this is a GPU job over audio with a different runtime and a different failure
+mode. Keeping them apart also keeps torch and fadtk off the filter's import
+path. Join the two reports on `(clip_id, plan_id)` if you want one table.
+
+Two scripts, differing only in which "original" they compare against:
+
+| script | reference | when |
+| --- | --- | --- |
+| [mert_similarity_report.py](scripts/mert_similarity_report.py) | always the manifest's `audio_path` | one manifest, lean output, simplest thing that answers "how far did this move" |
+| [calculate_ground_truth_similarity.py](scripts/calculate_ground_truth_similarity.py) | resolves per row, preferring the no-FX baseline | when the effects chain must be isolated from Demucs separation loss |
+
+Both share the model, the embedding cache and the percentile maths, so they agree
+by construction. Run them on `gpu_preempt` — measured at 0.220 s per embedding on
+CPU, a 23k-row manifest is ~1.6 h of CPU or well under an hour on a GPU, and the
+per-row flush plus `--resume` makes preemption cost one row.
 
 Embedding reuses `fadtk.MERTModel` (`m-a-p/MERT-v1-95M`, 768-dim, 24 kHz),
 already installed in `postmaster-clean`, subclassed to replace only the pooling.
@@ -332,8 +575,9 @@ Which "original" is used matters, and the render manifest carries three:
 
 | `reference` | source | measures |
 | --- | --- | --- |
-| `baseline` | `baseline_path`, the no-FX remix | the effects chain alone, since separation artifacts cancel |
-| `source` | `source_copy_path`, else `audio_path` | the edit *plus* Demucs separation loss |
+| `baseline` | `baseline_path`, the no-FX remix — render manifest only | the effects chain alone, since separation artifacts cancel |
+| `source` | agent input's `input_audio`, or `source_copy_path`/`audio_path` | the edit *plus* Demucs separation loss |
+| `poisoned_input` | a poison row with no clean original recorded | repair fidelity, not edit strength — never pool these |
 
 Which one was used is recorded per row, because the two are not poolable. Poison
 plans invert the pair — their `baseline_path` is the *degraded input*, so those
@@ -346,13 +590,45 @@ on a cutoff nobody has chosen from data yet. Set a float and it becomes an
 ordinary rejection reason. The raw value is always written, so re-thresholding
 never re-runs MERT.
 
-Calibrate before trusting a threshold. On real pairs the cosine sits in a very
-narrow band near 1.0 — a gain-only edit measured 0.99889 against its baseline
-where a reverb-plus-delay send measured 0.99836, so the ordering is right but the
-whole signal spans about 5e-4, while the spread *between* clips is two orders of
-magnitude wider. A single global cutoff is therefore unlikely to mean much;
-per-clip normalisation, or a pooling that preserves frame-level differences, is
-the direction to explore.
+Calibrate before trusting a raw threshold. On real pairs the cosine sits in a
+very narrow band near 1.0 — a gain-only edit measured 0.99889 against its
+baseline where a reverb-plus-delay send measured 0.99836, so the ordering is
+right but the whole signal spans about 5e-4, while the spread *between* clips is
+two orders of magnitude wider. That is what the percentile labels below are for:
+a rank discriminates where the raw value does not.
+
+### Percentile labels
+
+Every scored row also carries its rank in the corpus:
+
+| field | |
+| --- | --- |
+| `percentile` | 0–100, where 100 is the *most* similar to the original, i.e. the least audible edit |
+| `percentile_bucket` | quartile, ascending by similarity: `most_audible`, `audible`, `subtle`, `least_audible` |
+| `percentile_n` | the population the rank was taken against |
+
+The buckets are named for what the number means rather than Q1–Q4, because a
+high similarity is a *small* change: `least_audible` is the quartile at risk of
+being imperceptible, which is the whole reason this criterion exists. On a
+sample of twelve real pairs the ordering came out as you would hope — drum
+distortion in `most_audible`, a 7 ms chorus at low mix in `least_audible`.
+
+Labelling is a **second pass**, because a percentile describes a whole
+population and cannot be computed while scoring is still adding to it. It runs
+automatically at the end of a scoring run, and can be re-run on its own:
+
+```bash
+python scripts/calculate_ground_truth_similarity.py --label-percentiles
+```
+
+Two consequences worth knowing. A `--resume` that appends rows makes every
+existing label stale, which is why `percentile_n` is recorded — the filter
+compares it against what is actually in the file and warns rather than reporting
+a silently wrong rank. And a sharded run should pass `--no-label-percentiles`,
+then be labelled once at the end, or each shard ranks against its own slice
+instead of the corpus. Rows with no similarity are left null and excluded from
+the population, so the ranks do not depend on how much of the corpus has been
+rendered.
 
 ## Current Config Layout
 
