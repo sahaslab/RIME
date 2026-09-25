@@ -20,13 +20,31 @@ PARAM_ROLES = ("magnitude", "character", "ignore")
 PARAM_DIRECTIONS = ("ascending", "descending", "absolute")
 
 # Distribution kinds and how to read their reachable support out of
-# distributions.yaml. Mirrors DISTRIBUTION_HANDLER_NAMES in planner.py.
+# distributions.yaml. Mirrors DISTRIBUTION_HANDLER_NAMES in planner.py; every
+# kind the planner can resolve needs an entry here or band validation cannot
+# see what that parameter is able to take.
 SUPPORT_HANDLER_NAMES = {
     "choice": "_choice_support",
     "grid": "_choice_support",
     "values": "_choice_support",
     "uniform": "_interval_support",
-    "int_uniform": "_interval_support"
+    "int_uniform": "_interval_support",
+    # The fitted kinds all end by clamping the drawn value into [low, high]
+    # (planner._resolve_fitted_distribution), so that interval is the support
+    # whatever the mean, std or scale.
+    "normal": "_clamped_support",
+    "log_uniform": "_clamped_support",
+    "beta": "_clamped_support",
+    "power_law": "_clamped_support",
+    # A gaussian_mixture shares one [low, high] across its components, so the
+    # clamp bounds cover it without visiting them.
+    "gaussian_mixture": "_clamped_support",
+    "histogram": "_histogram_support",
+    "mixture": "_mixture_support",
+    # These model several parameters at once, so their support depends on which
+    # parameter is being asked about.
+    "joint": "_joint_support",
+    "parameters": "_parameters_support"
 }
 
 # Graph block kinds and the method that pulls parameter bearers out of them.
@@ -55,6 +73,38 @@ ALIAS_PREFIXES = ("apply_", "introduce_")
 ALIAS_SUFFIXES = ("_effect", "_filter", "_tool")
 
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+# Decimal places used when a parameter declares no `precision` of its own.
+DEFAULT_PRECISION = 2
+
+# How a unit is written out when a value is displayed. The config spells units
+# in lower case because they are keys; prose wants dB and Hz.
+UNIT_DISPLAY = {"db": "dB", "hz": "Hz", "khz": "kHz", "ms": "ms", "seconds": "s"}
+
+# Units that name a scale rather than a physical quantity. "0.35 normalized" is
+# not something anyone writes, so these print as a bare number.
+UNITLESS = ("normalized", "ratio", "q")
+
+
+def format_value(value: Any, precision: int | None, unit: str | None = None) -> str:
+    """Render a value the way a person would write it, not the way it is stored.
+
+    The fitted priors are continuous, so a sampled cutoff arrives as
+    55.63485084437943. Nobody says that out loud, and a prompt that quotes it is
+    not a realistic instruction, so display rounds to the precision the
+    parameter declares. The graph and the rendered audio keep the exact value --
+    this is a presentation concern only.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return str(value)
+    places = DEFAULT_PRECISION if precision is None else max(0, int(precision))
+    rounded = round(float(value), places)
+    # `%g` drops the trailing zeros `%.*f` would leave, so 0.50 reads as 0.5.
+    text = "%d" % int(rounded) if places == 0 else "%g" % rounded
+    if not unit or unit.lower() in UNITLESS:
+        return text
+    return "%s %s" % (text, UNIT_DISPLAY.get(unit.lower(), unit))
 
 
 def text_words(text: str) -> tuple[str, ...]:
@@ -104,6 +154,9 @@ class ParamSpec:
     role: str
     direction: str = "ascending"
     unit: str | None = None
+    # Decimal places for display and for the value check. None inherits the
+    # lexicon's default.
+    precision: int | None = None
     weight: float = 1.0
     hint: str | None = None
     note: str | None = None
@@ -185,6 +238,27 @@ class Support:
 
 
 @dataclass(frozen=True)
+class ChainParam:
+    """One parameter of one chain step, exactly as the graph carries it.
+
+    The unfiltered counterpart of `ParamDescriptor`: no band resolution, no
+    role filtering, non-numeric values kept. `is_block` records which lookup
+    the parameter answers to, `block_spec` or `param_spec`.
+    """
+
+    label: str
+    operator: str
+    param: str
+    value: Any
+    is_block: bool
+    # The enclosing graph block. A rule about band-limiting has to tell a pass
+    # filter on a reverb's wet return -- routine practice -- from one narrowing
+    # the signal itself, and the operator alone cannot.
+    block_kind: str
+    block_name: str
+
+
+@dataclass(frozen=True)
 class ParamDescriptor:
     """One parameter of one chain step, resolved to its descriptor band."""
 
@@ -192,6 +266,9 @@ class ParamDescriptor:
     operator: str
     param: str
     value: Any
+    # The value as a person would write it, unit included: "56 Hz", "-6.2 dB".
+    display: str
+    precision: int | None
     role: str
     unit: str | None
     band_terms: tuple[str, ...]
@@ -237,9 +314,9 @@ class ChainProfile:
     # naming each. A stem mapped to an empty tuple is exempt from the check.
     stem_names: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
-    def param_values(self) -> tuple[tuple[str, Any], ...]:
+    def param_values(self) -> tuple[tuple[str, Any, int | None], ...]:
         return tuple(
-            ("%s.%s" % (item.operator, item.param), item.value)
+            ("%s.%s" % (item.operator, item.param), item.value, item.precision)
             for item in (*self.descriptors, *self.unbanded)
         )
 
@@ -264,9 +341,11 @@ class BandLexicon:
         version: int = 1,
         operator_names: Mapping[str, tuple[str, ...]] | None = None,
         stem_names: Mapping[str, tuple[str, ...]] | None = None,
-        chain_vocabulary: Sequence[str] = ()
+        chain_vocabulary: Sequence[str] = (),
+        default_precision: int = DEFAULT_PRECISION
     ):
         self.version = version
+        self.default_precision = int(default_precision)
         self._chain_vocabulary = tuple(chain_vocabulary)
         self._operator_names = dict(operator_names or {})
         self._stem_names = dict(stem_names or {})
@@ -327,8 +406,13 @@ class BandLexicon:
                 for stem, names in (loaded.get("stem_names") or {}).items()
             },
             # Display terms, not match tokens, so they keep their own spelling.
-            chain_vocabulary=tuple(loaded.get("chain_vocabulary") or ())
+            chain_vocabulary=tuple(loaded.get("chain_vocabulary") or ()),
+            default_precision=int(loaded.get("default_precision", DEFAULT_PRECISION))
         )
+
+    def precision_for(self, spec: ParamSpec) -> int:
+        """Decimal places to display a parameter at, falling back to the default."""
+        return self.default_precision if spec.precision is None else spec.precision
 
     @staticmethod
     def _normalize_names(names: Any) -> tuple[str, ...]:
@@ -546,12 +630,14 @@ class BandLexicon:
                 label=override_label
             )
 
+        precision = definition.get("precision")
         return ParamSpec(
             operator=owner,
             param=param,
             role=role,
             direction=direction,
             unit=definition.get("unit"),
+            precision=None if precision is None else int(precision),
             weight=float(definition.get("weight", 1.0)),
             hint=definition.get("hint"),
             note=definition.get("note"),
@@ -572,14 +658,17 @@ class BandLexicon:
     ) -> Support:
         support = Support()
         for ref in spec.sample_refs:
-            support = support.merge(self._distribution_support(ref, distributions))
+            support = support.merge(
+                self._distribution_support(ref, distributions, spec.param)
+            )
         return support.absolute() if spec.direction == "absolute" else support
 
     @classmethod
     def _distribution_support(
         cls,
         ref: str,
-        distributions: Mapping[str, Any]
+        distributions: Mapping[str, Any],
+        param: str
     ) -> Support:
         node: Any = distributions
         for part in ref.split("."):
@@ -588,17 +677,31 @@ class BandLexicon:
             node = node[part]
         if not isinstance(node, Mapping):
             raise ValueError("Distribution '%s' is not a distribution node." % ref)
+        return cls._node_support(node, param, ref, distributions)
 
+    @classmethod
+    def _node_support(
+        cls,
+        node: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         distribution_type = node.get("type", "choice")
         handler_name = SUPPORT_HANDLER_NAMES.get(distribution_type)
         if handler_name is None:
             raise ValueError(
                 "Unsupported distribution type '%s' for '%s'." % (distribution_type, ref)
             )
-        return getattr(cls, handler_name)(node)
+        return getattr(cls, handler_name)(node, param, ref, distributions)
 
     @staticmethod
-    def _choice_support(spec: Mapping[str, Any]) -> Support:
+    def _choice_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         points: list[float] = []
         for item in spec.get("values", []):
             value = item["value"] if isinstance(item, Mapping) and "value" in item else item
@@ -607,17 +710,158 @@ class BandLexicon:
         return Support(points=tuple(points))
 
     @staticmethod
-    def _interval_support(spec: Mapping[str, Any]) -> Support:
+    def _interval_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
         low = float(spec["low"])
         high = float(spec["high"])
-        # The declared `samples` are the auditable landmarks band edges are cut
-        # against, so carry them alongside the continuous range.
+        # `samples` is optional: the hand-written priors declared landmark values
+        # for band edges to be cut against, while the fitted priors carry only
+        # the range. Either way the interval is what bounds the parameter.
         points = tuple(
             float(sample)
             for sample in spec.get("samples", [])
             if isinstance(sample, (int, float))
         )
         return Support(points=points, intervals=((low, high),))
+
+    @staticmethod
+    def _clamped_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of a fitted distribution: the clamp bounds, nothing more.
+
+        `normal` and `log_uniform` draw from a shape that is unbounded or
+        log-spaced, but the planner clamps every result into [low, high], so no
+        value outside that interval is reachable and the shape parameters say
+        nothing about coverage.
+        """
+        return Support(intervals=((float(spec["low"]), float(spec["high"])),))
+
+    @staticmethod
+    def _histogram_support(
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of a histogram: one interval per bin that can be drawn from.
+
+        Bins are reported individually rather than as a single [low, high] span
+        so that a zero-weight bin is correctly seen as unreachable -- the
+        planner's bin walk skips those -- and a band covering only such a bin is
+        still reported dead. Edges are read on the linear scale they are written
+        in; `scale: log` affects how the planner interpolates inside a bin, not
+        which values a bin spans.
+        """
+        low = float(spec["low"])
+        high = float(spec["high"])
+        edges = [float(edge) for edge in spec.get("edges", [])]
+        weights = [float(weight) for weight in spec.get("weights", [])]
+        if len(edges) != len(weights) + 1:
+            # Malformed histograms are the planner's to reject; fall back to the
+            # clamp bounds so band validation stays conservative rather than
+            # raising a second, less informative error here.
+            return Support(intervals=((low, high),))
+        intervals = [
+            (max(low, left), min(high, right))
+            for left, right, weight in zip(edges, edges[1:], weights)
+            if weight > 0.0 and max(low, left) < min(high, right)
+        ]
+        return Support(intervals=tuple(intervals)) if intervals else Support(
+            intervals=((low, high),)
+        )
+
+    @classmethod
+    def _joint_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of one parameter inside a joint distribution.
+
+        A joint draws several correlated parameters at once, so the support for
+        band validation is that of the named parameter, unioned over components.
+        Component weights are not filtered on: enumeration walks every component
+        regardless of weight, so all of them are reachable.
+        """
+        support = Support()
+        available: set[str] = set()
+        for component in spec.get("components", []):
+            parameters = component.get("parameters") or {}
+            available.update(parameters)
+            model = parameters.get(param)
+            if model is not None:
+                support = support.merge(
+                    cls._node_support(model, param, ref, distributions)
+                )
+        if support.is_empty() and available:
+            raise ValueError(
+                "Joint distribution '%s' models %s, not '%s'." % (
+                    ref,
+                    ", ".join(sorted(available)),
+                    param
+                )
+            )
+        return support
+
+    @classmethod
+    def _parameters_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of one parameter inside a `parameters` block.
+
+        Like a joint, this draws several parameters at once, but flat: each name
+        maps either to an inline model or to `{sample: dotted.ref}` pointing at
+        another distribution, so a ref has to be followed.
+        """
+        models = spec.get("parameters") or {}
+        model = models.get(param)
+        if model is None:
+            raise ValueError(
+                "Distribution '%s' models %s, not '%s'." % (
+                    ref,
+                    ", ".join(sorted(models)) or "nothing",
+                    param
+                )
+            )
+        if "sample" in model:
+            return cls._distribution_support(model["sample"], distributions, param)
+        return cls._node_support(model, param, ref, distributions)
+
+    @classmethod
+    def _mixture_support(
+        cls,
+        spec: Mapping[str, Any],
+        param: str,
+        ref: str,
+        distributions: Mapping[str, Any]
+    ) -> Support:
+        """Support of a mixture: the union over its components.
+
+        Component weights are not filtered on, because enumeration walks every
+        component regardless of weight.
+        """
+        support = Support()
+        for component in spec.get("components", []):
+            model = component.get("distribution")
+            if model is not None:
+                support = support.merge(
+                    cls._node_support(model, param, ref, distributions)
+                )
+        return support
 
     @staticmethod
     def _check_coverage(spec: ParamSpec, support: Support) -> None:
@@ -658,6 +902,43 @@ class ChainReader:
     def __init__(self, lexicon: BandLexicon, registry: OperatorRegistry):
         self.lexicon = lexicon
         self.registry = registry
+
+    def iter_params(
+        self,
+        graph_spec: Sequence[Mapping[str, Any]]
+    ) -> Iterator[ChainParam]:
+        """Every parameter a graph carries, flattened, in graph order.
+
+        The public door onto the block walk, for consumers that need the graph
+        as written rather than as banded. `profile` is the wrong source for
+        those: it drops every `role: ignore` parameter, which is where
+        `apply_reverb_effect.width`, the reverb wet/dry levels and
+        `apply_chorus_effect.centre_delay_ms` live -- exactly the pinned values
+        a rule about them has to read.
+
+        Deliberately not used by `profile` itself, which counts an operator as
+        present before looking at its parameters and so must keep seeing the
+        `separate` and `mix` blocks that carry none.
+        """
+        for block in graph_spec:
+            kind = block.get("kind")
+            handler_name = BLOCK_READER_NAMES.get(kind)
+            if handler_name is None:
+                raise ValueError("Unsupported graph block kind '%s'." % kind)
+            # One block at a time, through the same per-kind readers
+            # `_read_blocks` dispatches to, so the enclosing block stays known.
+            block_name = str(block.get("name") or block.get("prefix") or kind)
+            for label, owner, is_block, params in getattr(self, handler_name)(block):
+                for param, value in sorted(params.items()):
+                    yield ChainParam(
+                        label=label,
+                        operator=owner,
+                        param=param,
+                        value=value,
+                        is_block=is_block,
+                        block_kind=str(kind),
+                        block_name=block_name
+                    )
 
     def profile(self, graph_spec: Sequence[Mapping[str, Any]]) -> ChainProfile:
         descriptors: list[ParamDescriptor] = []
@@ -739,11 +1020,14 @@ class ChainReader:
         spec = spec.for_label(label)
         index, out_of_band = spec.band_index(value)
         terms = spec.bands[index].suggested_terms
+        precision = self.lexicon.precision_for(spec)
         return ParamDescriptor(
             label=label,
             operator=spec.operator,
             param=spec.param,
             value=value,
+            display=format_value(value, precision, spec.unit),
+            precision=precision,
             role=spec.role,
             unit=spec.unit,
             band_terms=terms,
@@ -753,18 +1037,21 @@ class ChainReader:
             out_of_band=out_of_band
         )
 
-    @staticmethod
     def _unbanded_descriptor(
+        self,
         label: str,
         owner: str,
         param: str,
         value: Any
     ) -> ParamDescriptor:
+        precision = self.lexicon.default_precision
         return ParamDescriptor(
             label=label,
             operator=owner,
             param=param,
             value=value,
+            display=format_value(value, precision),
+            precision=precision,
             role="character",
             unit=None,
             band_terms=(),
@@ -1031,19 +1318,53 @@ class AbstractionLadder:
     def _missing_values(cls, text: str, profile: ChainProfile) -> list[str]:
         normalized = NON_ALNUM_RE.sub("", text.lower())
         missing: list[str] = []
-        for name, value in profile.param_values():
+        for name, value, precision in profile.param_values():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
-            renderings = cls._value_renderings(float(value))
+            renderings = cls._value_renderings(float(value), precision)
             if not any(rendering in normalized for rendering in renderings):
                 missing.append("%s=%s" % (name, value))
         return missing
 
     @staticmethod
-    def _value_renderings(value: float) -> tuple[str, ...]:
+    def _value_renderings(value: float, precision: int | None = None) -> tuple[str, ...]:
+        """Every way a value may legitimately be written, for the AL0 check.
+
+        `%g` alone is not enough, and was silently failing compliant text. It
+        renders 6 significant figures, so 9.542225928900793 becomes "9.54223" --
+        which, once separators are stripped, is NOT a substring of the digits
+        the graph actually carries ("9542225928900793"). An instruction quoting
+        the value exactly therefore failed the check that demands it.
+
+        That went unnoticed while the priors declared discrete `samples` like
+        4.0 and 0.25, where `%g` is exact. The fitted priors are continuous and
+        nothing rounds, so every sampled value now arrives as float64 and the
+        mismatch applies to all of them: measured over 1000 rows, 36% of AL0's
+        `omitted value` failures had every value present verbatim.
+
+        So both ends are accepted: the full-precision form, and the rounded
+        forms a writer would sensibly use. A model that writes "9.54 ms" is
+        doing the more useful thing than one that transcribes 17 digits, and
+        neither should fail.
+
+        Rounding is accepted from the parameter's declared precision *and
+        finer*, never coarser. That asymmetry matters: a cutoff declares 0
+        places so "56" passes for 55.63, while a normalized mix declares 2, so
+        0.75 is not satisfied by a bare "1" -- which, being a single digit,
+        would otherwise match almost any text containing a number.
+        """
         magnitude = abs(value)
         plain = "%g" % magnitude
         renderings = {plain, plain.lstrip("0") or plain}
+        # The digits as the graph carries them.
+        renderings.add(repr(magnitude))
+        # Rounded to a precision a person would actually say. `%g` on the
+        # rounded value drops the trailing zeros that `%.*f` would leave, so
+        # 9.5 stays "9.5" rather than becoming "9.50".
+        floor = DEFAULT_PRECISION if precision is None else max(0, int(precision))
+        for places in range(floor, 5):
+            rounded = round(magnitude, places)
+            renderings.add("%d" % int(rounded) if places == 0 else "%g" % rounded)
         if magnitude >= 1000.0:
             renderings.add("%gk" % (magnitude / 1000.0))
         if magnitude.is_integer():

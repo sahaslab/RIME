@@ -1,0 +1,924 @@
+# Rejection filtering for generated ground-truth rows.
+#
+# Stage 5 of the ground-truth stack: reads the prompt artifact and raises four
+# flags per row. Two are binary and concern the abstraction ladder; two are
+# enums and concern whether the edit is musically coherent at all.
+#
+#   al_rules        binary   does each level satisfy its own rules
+#   al_consistency  binary   is AL1 consistent with AL0, AL2 with AL1
+#   joint_params    enum     plausible | implausible | unclear
+#   stylistic       enum     appropriate | inappropriate | unclear
+#
+# Two mechanisms, deliberately separated:
+#
+#   `trigger` / `detect` are DETERMINISTIC predicates in the condition DSL of
+#   constraints.yaml, evaluated by ground_truth/predicates.py. They decide
+#   whether a rule is even in play, and therefore whether a model call happens
+#   at all. A row that triggers nothing gets its `default_verdict` for free.
+#
+#   The judge then ADJUDICATES the rules that fired. It is handed the rule
+#   statements, their sources, and the actual parameter values, so it never has
+#   to do arithmetic -- only decide whether the numbers mean what the rule says
+#   they mean in this chain. It may overturn a trigger, which is why rules carry
+#   `suggests` rather than a verdict.
+#
+# Every rule carries the source it came from, because a rule without one is a
+# hunch and the judge is told to weigh sourced rules only.
+#
+# A rule whose trigger cannot be reached under the current operators.yaml,
+# motifs.yaml and distributions.yaml is DORMANT. Dormant rules are kept on
+# purpose: they cost nothing, they record the intent, and they arm themselves if
+# a support widens. Nothing here declares its own dormancy --
+# `scripts/filter_ground_truth_prompts.py --reachability` derives it, so it
+# cannot go stale.
+#
+# Editing guideline, mirroring abstraction_levels.yaml:
+# - keep a criterion's `system_prompt` to who is speaking and how long they
+#   speak; put anything checkable in `rules`
+# - every rule needs `id`, `statement`, `source`
+# - keep `trigger` cheap and slightly over-inclusive. It decides whether to
+#   spend a call, not what the verdict is.
+# - keep triggers SINGLE-KEY. The evaluator tests comparisons before handlers
+#   and returns on the first key it finds, so a two-key mapping silently
+#   evaluates only one of them.
+# - span the verdict range in `exemplars`. A set of uniformly `implausible`
+#   examples pulls the judge toward implausible regardless of the row.
+version: 1
+
+rejection:
+  # The judge, deliberately NOT the generator's nvidia.nemotron-nano-3-30b: a
+  # model grading prose it wrote itself measures authorship as much as
+  # compliance. Verified `converse` on litellm 1.83.9 -- and unlike the Nemotron
+  # id, THIS one needs its `-v1:0` suffix to route that way. See the table in
+  # summarization.yaml.
+  #
+  # Note for existing artifacts: every prompt file generated before the
+  # Nemotron switch was written BY this model, so judging those rows reproduces
+  # exactly the self-preference the split is meant to avoid. The separation only
+  # holds for prompts regenerated after the switch.
+  model:
+    name: bedrock/qwen.qwen3-235b-a22b-2507-v1:0
+    # Zero, inverting the generator's 0.7. That 0.7 exists so a re-send differs
+    # after a failed check; a judge's retry instead appends the parse failure to
+    # the prompt, so the input changes and a deterministic model can still
+    # correct itself. A verdict should be reproducible.
+    temperature: 0.0
+    aws_region_name: us-west-2
+    aws_profile_name: null
+    num_retries: 2
+    timeout_s: 120
+
+  paths:
+    # The prompt artifact from scripts/generate_ground_truth_prompts.py. Its
+    # `prompt_levels` entries are what this stage judges, and their `text` is
+    # exactly `prompt_variants` ordered by level -- the entries just carry the
+    # rubric and constraints beside the same text.
+    #
+    # Agent input from scripts/generate_agent_input.py is also accepted; the
+    # format is detected, not configured. It was briefly the default while this
+    # stage also computed the MERT similarity and needed the audio paths agent
+    # input carries. The similarity now lives in its own scripts, so the prompt
+    # file is the natural input again.
+    prompts: derived/ground_truth/subsampled_prompts.jsonl
+    # Re-join source. The plan row flattens the clip's `analysis` down to
+    # genres/mood_themes/issues plus a flat `caption`, dropping `aspect_list`,
+    # `instrument_tags` and `tempo_bpm`. The stylistic criterion needs the
+    # first, and the delay-beats inversion needs the last.
+    analysis: derived/ground_truth/mtg_jamendo_analysis_manifest.jsonl
+    # The MusicCaps captions CSV, keyed by ytid. REQUIRED for the stylistic
+    # criterion to read real prose: `caption` arrives null in every prompt row,
+    # and the `aspect_list` that survives is the mined phrase set with the
+    # production language stripped out. Without this the judge sees
+    # "slide guitar, blues, guitar layers" where the caption said "a distant
+    # filtered vocal hum ... from another room" -- and `distant` is a space cue.
+    captions: /dartfs/rc/lab/S/SinghN/shared/musiccaps/musiccaps_captions.csv
+    output: derived/ground_truth/rejection_report.jsonl
+    # Rows needing a human. Optional; unset means they stay only in `output`.
+    review: derived/ground_truth/rejection_review.jsonl
+    failures: derived/ground_truth/rejection_failures.jsonl
+    # --generate-full-manifest writes here: every input record in full, with its
+    # verdict attached under a `rejection` key. `output` above stays a compact
+    # sidecar regardless, because that is what --resume reads back and learning
+    # which rows are done should not mean re-parsing every prompt record.
+    full_manifest: derived/ground_truth/rejection_full_manifest.jsonl
+    # --report-path writes here: one flat row per record carrying
+    # prompt_variants, the ids, and one column per flag. The lean artifact for
+    # analysis, where `output` above is the nested audit trail.
+    report: derived/ground_truth/rejection_report_flat.jsonl
+
+  run:
+    # Attempts per judge call before recording an unparseable verdict.
+    max_attempts: 3
+    max_workers: 4
+    # Criteria to evaluate; empty means all.
+    criteria: []
+    subsample_num: -1
+    seed: 0
+
+  # MERT embedding similarity between the original and the edited audio.
+  #
+  # NOT read by the judge. This stage evaluates symbolic criteria only; the
+  # similarity is computed by scripts/mert_similarity_report.py and
+  # scripts/calculate_ground_truth_similarity.py, which read this block through
+  # `load_rejection_config(config_dir).mert`. It lives here because this is the
+  # ground-truth config directory those scripts already load, not because the
+  # filter uses it -- move it to its own file if that proves confusing.
+  #
+  # It remains the one criterion that needs audio rather than symbols, and the
+  # only one that can catch an edit too subtle to hear. No rule check can.
+  mert_similarity:
+    # `fadtk` size string. The loader, processor, 24kHz resampling and 6-minute
+    # truncation all come from fadtk.MERTModel, which is already installed in
+    # postmaster-clean -- this adds no dependency.
+    model: MERT-v1-95M
+
+    # `all` means mean over the 13-layer stack, then mean over time. An integer
+    # takes that layer alone.
+    #
+    # Setting this to 12 reproduces an unmodified fadtk.MERTModel() exactly,
+    # which matters: the lab's existing FAD/KAD analysis under
+    # /dartfs/rc/lab/S/SinghN/rime/rime_analysis is single-layer at 12, so 12 is
+    # the setting under which these numbers and those are comparable.
+    layer: all
+
+    # Null autodetects cuda, falling back to cpu.
+    device: null
+
+    # Render manifest mapping (clip_id, plan_id) -> rendered audio. REQUIRED for
+    # --include-mert: this stage never triggers a render itself, since that would
+    # mean booting the MCP server and Demucs. Rows with no rendered audio report
+    # a null similarity with reason `not_rendered`.
+    render_manifest: null
+
+    # Per-file embedding cache, keyed on path + mtime + size + model + layer.
+    # This is what makes the reference side cheap: one clip's baseline is shared
+    # by every plan targeting that stem, so a thousand edited renders need only a
+    # few hundred reference embeddings.
+    cache_dir: derived/ground_truth/mert_cache
+    similarity_path: derived/ground_truth/mert_similarity.jsonl
+
+    # Which "original" to compare against. The render manifest carries three, and
+    # they do not measure the same thing:
+    #   baseline  the no-FX remix -- separated and remixed with no effects, so
+    #             the distance is the effects chain and not Demucs
+    #   source    the untouched recording, which conflates separation loss with
+    #             the edit
+    # `baseline_then_source` prefers the baseline and falls back where none was
+    # rendered, recording per row which it used. Do not pool the two.
+    reference: baseline_then_source
+
+    # Null means report the number and leave the flag's verdict null, so the
+    # similarity is descriptive and rejects nothing. Set a float once a threshold
+    # has been chosen from real data: at or above it, the edit is too close to
+    # the original to be noticeable. The raw value is always written, so
+    # re-thresholding never re-runs MERT.
+    similarity_threshold: null
+
+  # An instruction that names `separate_audio`, writes
+  # `apply_reverb_effect(room_size=0.9)` or carries a `->` out of the graph is
+  # describing the implementation rather than asking for a sound. Measured on
+  # 1000 rows of the MusicCaps artifact, 28% of rows leak something, almost all
+  # at AL0 -- including texts that are the graph_description pasted verbatim.
+  #
+  # Deterministic, so it costs no judge call. The identifiers are DERIVED from
+  # operators.yaml and each row's own graph_spec rather than listed here, so a
+  # new operator or a renamed motif step is covered without an edit. Only
+  # underscore-bearing identifiers are matched: `drums` and `reverb` are what a
+  # person would say, `apply_reverb_effect` and `room_size` are not.
+  implementation_leak:
+    # Syntax that is never human phrasing, whatever the graph contains.
+    syntax_patterns:
+      # A graph arrow, as in `-> target_stem, residual`.
+      - '->'
+      # Call syntax with a keyword argument, as in `apply_gain(gain_db=-6.1)`.
+      - '\w+\([A-Za-z_]+\s*='
+    # Identifiers to never flag even though they carry an underscore. Empty for
+    # now; add one here rather than weakening the derivation if a legitimate
+    # phrase collides.
+    allow: []
+
+  # Which verdicts reject.
+  reject_policy:
+    al_rules: [fail]
+    al_consistency: [fail]
+    # Which KINDS of consistency failure disqualify a row. The verdict stays an
+    # honest "does it describe the source correctly"; this decides which sort of
+    # wrongness is fatal.
+    #
+    # Wrong interpretation and hallucination both mean the instruction describes
+    # audio the graph will not produce, which is the one thing a training pair
+    # cannot survive. Omission is recorded but does not reject by default: at
+    # high abstraction, dropping a processor is often the difference between a
+    # terse instruction and a complete one rather than a falsehood. Pass
+    # --omission-reject to treat it as fatal too.
+    al_consistency_failures: [wrong_interpretation, hallucination]
+    joint_params: [implausible]
+    stylistic: [inappropriate]
+    # A prompt carrying graph syntax is unusable as training text whatever else
+    # is right about it, so this one does reject. Empty the list to demote it to
+    # a reported-only signal.
+    implementation_leak: [leaked]
+    # What to do with a verdict not named above: keep | reject | review.
+    # Rejecting `unclear` is the tempting default and the wrong one: it biases
+    # the corpus against unusual-but-valid edits, and collapsing edit diversity
+    # toward the conventional centre costs an instruction-following dataset more
+    # than a few odd plans getting through.
+    unclear:
+      default: keep
+      joint_params: keep
+      stylistic: review
+      implementation_leak: keep
+    # A row whose judge call never returned parseable JSON is never silently
+    # accepted.
+    on_judge_error: review
+
+  # Appended to every criterion's system prompt, so the output contract is
+  # stated once and cannot drift between them.
+  output_contract: >-
+    Return exactly one JSON object and nothing else: no preamble, no code fence,
+    no commentary, no trailing text. Cite rules only by the ids you were given.
+    If the evidence does not settle the question, say so with the unclear
+    verdict rather than guessing.
+
+  # What "consistent with the level below" MEANS, per constraint. The levels
+  # already declare their own contract in abstraction_levels.yaml -- L1 is
+  # {effect_name: preserve, parameter_values: banded, operator_order: free} --
+  # and every prompt row carries that dict. So consistency needs no hand-written
+  # pairwise rules: it is those declarations, glossed into judgeable words. A
+  # new level added to the ladder is covered the moment its constraint values
+  # appear here.
+  # What each level is LICENSED to discard, and what it remains obliged to
+  # carry. Phrased in the failure vocabulary the judge reports in, so the two
+  # cannot drift apart.
+  #
+  # This is what makes omission answerable. AL2 is supposed to drop every
+  # parameter value; without this block a judge asked "did it leave anything
+  # out" would fail every correctly-written level. The levels already declare
+  # their own contract in abstraction_levels.yaml and every prompt row carries
+  # it, so these are those declarations glossed into obligations -- a new level
+  # is covered as soon as its constraint values appear here.
+  constraint_glosses:
+    parameter_values:
+      exact: >-
+        Every value from the graph must appear, with its unit. A value that is
+        absent is an omission; one that is present but different is a wrong
+        interpretation.
+      banded: >-
+        Numerals and units must be gone -- discarding them is licensed and is
+        never an omission. What must survive is the MAGNITUDE: a descriptor
+        landing in a different band than the source's value is a wrong
+        interpretation, because a reader would expect the wrong amount. Using
+        different words than the suggested ones is not a failure of any kind.
+      omit: >-
+        Numeric values are dropped entirely and so is per-parameter detail;
+        both are licensed. Only the chain's overall magnitude must survive, and
+        getting that magnitude wrong is a wrong interpretation.
+    effect_name:
+      preserve: >-
+        Every effect in the source must stay identifiable, by its usual name or
+        by a common word for what it does. An effect that has vanished is an
+        omission; an effect that appears here but not in the source is a
+        hallucination.
+      incidental: >-
+        Naming an effect is licensed but not required, so dropping a name is
+        never an omission. Describing processing the source does not contain is
+        still a hallucination.
+    operator_order:
+      preserve: >-
+        The processors must be described in the source's order; a different
+        order is a wrong interpretation.
+      free: >-
+        Reordering is licensed and is never a failure of any kind.
+    focus:
+      chain_character: >-
+        The rewrite describes the combined result rather than the individual
+        processors, and dropping the per-processor detail is licensed.
+        Enumerating processors is a failure of this level's own rubric, not of
+        fidelity -- report it under al_rules, not as a consistency failure.
+
+  # Lexical gate for the stylistic criterion. Matched as whole words against the
+  # caption and the re-joined aspect_list.
+  #
+  # These deliberately include the production vocabulary that
+  # datasets/musiccaps.yaml's `aspect_stopwords` discards -- noise, quality,
+  # hiss, hum, distortion, mono, stereo. Dropping them is right for genre
+  # mining, where "ambient noises" would otherwise mislabel a hundred clips as
+  # the ambient genre. They are exactly what this filter needs, though: they are
+  # the caption talking about the recording rather than the music.
+  caption_cues:
+    dry: [dry, close, close-miked, closely miked, intimate, upfront, up front, in your face, direct, tight, unprocessed]
+    reverberant: [reverberant, reverb, reverby, cavernous, washy, spacious, roomy, echoing, echoey, distant, ambient space, hall]
+    pristine: [pristine, professional, professionally recorded, studio, studio quality, high quality, high fidelity, hi-fi, well recorded, clean recording, crisp]
+    lofi: [lo-fi, lofi, low quality, amateur, amateurish, poor quality, noisy, hiss, hissing, tape hiss, static, degraded, muffled recording, bad recording]
+    mono: [mono, monophonic, single channel, one channel]
+    dense: [dense, busy, cluttered, wall of sound, thick, layered, full arrangement, crowded]
+    sparse: [sparse, minimal, minimalistic, stripped back, solo, bare, empty]
+    bass_forward: [bass heavy, bass-heavy, prominent bass, booming, boomy, deep bass, sub bass, heavy low end, bass line, bassline, kick]
+    retro: [retro, vintage, old, oldies, nostalgic, classic, sixties, seventies, eighties, 60s, 70s, 80s, analog, analogue]
+    modern: [modern, contemporary, current, polished, edm, dubstep, trap, hyperpop]
+
+  criteria:
+    # ------------------------------------------------------------------
+    # One call per level, producing BOTH binary flags for that level.
+    #
+    # The two questions share a context and partly ARE the same question: L1's
+    # own rubric already asks whether "each parameter's descriptor lands in the
+    # band the graph actually specifies", which is an L1-against-L0 check, and
+    # L2's asks whether the magnitude is "consistent with the computed chain
+    # intensity". Splitting them into separate calls would send the same graph,
+    # the same parent text and the same band table twice to grade overlapping
+    # criteria. The flags stay separate in the output row; only the call is
+    # shared.
+    # ------------------------------------------------------------------
+    - id: al_levels
+      produces: [al_rules, al_consistency]
+      per: level
+      output: binary
+      default_verdict: pass
+      system_prompt: >-
+        You are auditing one instruction written for a music-editing dataset.
+        You are given the symbolic edit graph it describes, the instruction one
+        level of abstraction below it, the rules that instruction was written
+        under, and what this level is licensed to discard. You decide two
+        things and nothing else. First, whether the instruction obeys its own
+        rules. Second, and separately, whether it correctly describes the
+        instruction it was derived from -- the same edit, at less precision,
+        still truthfully. You are indifferent to style. You do not rewrite
+        anything.
+      rules:
+        - >-
+          Judge the instruction only against the rules and contract supplied.
+          Do not import preferences of your own about how it should read.
+        - >-
+          The contract says what this level MAY discard. Discarding something
+          the contract permits is never an inconsistency, however much detail is
+          lost. Adding processing the source does not describe always is.
+        - >-
+          For a banded level, a descriptor is correct when it lands in the band
+          the graph specifies. The suggested wording is a suggestion: different
+          words in the right band are correct, and the suggested words in the
+          wrong band are not.
+        - >-
+          For consistency, judge fidelity to the source, not conformance to a
+          contract. Ask only whether a reader of the rewrite would come away
+          with a true picture of the edit the source describes. Classify each
+          way it fails:
+        - >-
+          wrong_interpretation -- the element IS in the source but the rewrite
+          describes it incorrectly: a cut described as a boost, a large space
+          described as subtle, the wrong stem, one processor mistaken for
+          another. The information is present and wrong. Calling a reverb a
+          delay is this, not hallucination.
+        - >-
+          hallucination -- the rewrite describes processing, a parameter or a
+          target that is not in the source at all. Something is ADDED while the
+          rest stays intact.
+        - >-
+          omission -- something the level was obliged to keep is missing. Being
+          less detailed than the source is NOT omission where the licence above
+          permits it; that is the abstraction working as intended.
+        - >-
+          A rewrite can fail in more than one way, so list every kind that
+          applies. An empty list means it describes the source correctly.
+        - >-
+          Do not report the same defect under both verdicts. `al_rules` grades
+          the text against its own level's rubric; consistency grades it
+          against the source. A missing operator can be either or both, but say
+          so once under each only if it genuinely fails both tests.
+        - >-
+          Cite rule failures by the index of the rubric item. An unattributable
+          failure is not a failure.
+        - >-
+          Mechanical checks have already run separately. Judge only what they
+          cannot settle.
+        - >-
+          Give each failing verdict exactly one sentence of justification,
+          naming the rubric item or contract term it breaks. The two verdicts
+          get their own sentence each: they answer different questions and can
+          disagree, so one sentence covering both explains neither. A passing
+          verdict needs none.
+      exemplars:
+        - verdict: pass
+          note: >-
+            AL1 "Give the guitar a subtle wash of reverb and a slow, deep
+            swirl" against an AL0 naming a 0.25 room-size reverb and a 0.35 Hz,
+            0.65-depth chorus. Every element survives, described truthfully and
+            at the right strength. The numbers are gone, which this level is
+            licensed to discard, so that is not an omission.
+        - verdict: fail
+          note: >-
+            wrong_interpretation. AL1 "Add a cavernous reverb to the vocal"
+            against an AL0 naming a 0.25 room size. The reverb is really there,
+            so nothing is invented and nothing is missing -- it is simply
+            described as three bands larger than it is, and a reader would
+            expect the wrong sound.
+        - verdict: fail
+          note: >-
+            hallucination. AL1 "Put the drums through a parallel bus with heavy
+            compression and obvious grit" against a graph whose only processor
+            is distortion. The grit is faithful; the bus and the compressor
+            were invented, and no amount of abstraction introduces a processor
+            that was not there.
+        - verdict: fail
+          note: >-
+            omission. AL1 "Bring the vocal up" against an AL0 describing a gain
+            lift AND a de-esser. The gain is right, nothing is invented, but a
+            whole processor the level was obliged to keep has vanished. Had the
+            same text dropped only the dB figure, that would be licensed and
+            not an omission.
+        - verdict: fail
+          note: >-
+            Two at once. AL2 "Wash the guitar in a huge echoing hall" against
+            an AL1 describing a short slapback delay and no reverb: the delay
+            is mis-described as a hall (wrong_interpretation) and the hall
+            itself is not in the source (hallucination).
+      response_schema:
+        al_rules: {verdict: "pass|fail", failed_rubric_items: "[int]"}
+        al_consistency: {verdict: "pass|fail", violated_constraints: "[str]"}
+        rationale: str
+      max_tokens: 512
+
+    # ------------------------------------------------------------------
+    # Joint parameter plausibility.
+    #
+    # All three rules below are DORMANT against the current distributions: the
+    # chorus cannot run fast, no operator carries a resonance control, and delay
+    # feedback tops out at 0.45. They are encoded anyway, with their sources, so
+    # that widening a support arms them rather than silently leaving the
+    # combination unchecked. Expect this criterion to return `plausible` with
+    # `gated: true` and zero model calls on every row until then; the
+    # reachability report is what it currently earns.
+    # ------------------------------------------------------------------
+    - id: joint_params
+      produces: [joint_params]
+      per: row
+      output: enum
+      values: [plausible, implausible, unclear]
+      default_verdict: plausible
+      system_prompt: >-
+        You are a mixing engineer asked whether a set of parameter values,
+        sampled together, describe a setting someone would actually use, or an
+        accident of independent sampling. You judge the combination, never a
+        single value on its own. You have the numbers in front of you, so you do
+        not estimate them.
+      rules:
+        - >-
+          Judge only the interaction the triggered rule names. A value that is
+          extreme on its own is not this criterion's concern.
+        - >-
+          Answer implausible when the combination stops being an edit of the
+          source and becomes something else: a warble instead of movement, a
+          tone instead of a filtered signal, a wash instead of an echo.
+        - >-
+          Answer plausible when the surrounding chain defuses the interaction --
+          a barely-open send, a heavily damped return -- and say which part of
+          the chain does so.
+        - >-
+          Answer unclear when the rule fired but the audible result genuinely
+          depends on material you cannot hear.
+        - >-
+          Give exactly one sentence of justification, naming the interaction and
+          what it does to the sound. It is read next to the verdict in a table,
+          so a paragraph is worse than a sentence.
+      rules_detail:
+        - id: mod_rate_vs_depth
+          statement: >-
+            Low modulation depths work well at faster LFO speeds, while deeper
+            modulation works better at slower modulation rates. A fast rate at a
+            deep setting reads as warbling rather than as movement.
+          source: "Sound on Sound -- Effects: All You Need To Know (And A Little Bit More)"
+          applies_to:
+            operator_tags: [modulation]
+            requires_params: [rate_hz, depth]
+          trigger:
+            all:
+              - gte: {path: params.max.apply_chorus_effect.rate_hz, value: 1.5}
+              - gte: {path: params.max.apply_chorus_effect.depth, value: 0.6}
+          suggests: implausible
+
+        - id: filter_resonance_self_oscillation
+          statement: >-
+            Resonance can be cranked high enough that a filter self-oscillates,
+            producing a sine wave whose pitch is set by the cutoff. Past that
+            point the filter is a tone generator rather than an edit of the
+            source.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Filters"
+          # Mapped onto the only Q this pipeline has, which is not really the
+          # same control: `q` on a peak or shelf band sets bandwidth, and no
+          # amount of it self-oscillates. Arming this rule needs a resonant
+          # filter OPERATOR, not a wider Q support -- which is why the
+          # reachability report distinguishes a narrow distribution from a
+          # missing control.
+          applies_to:
+            operator: apply_peak_filter
+            requires_params: [q]
+          trigger:
+            gte: {path: params.max.apply_peak_filter.q, value: 10.0}
+          suggests: implausible
+
+        - id: delay_feedback_runaway
+          statement: >-
+            With feedback cranked up full the signal keeps compounding until it
+            reaches a deafening squall. Near the top of the range the repeats
+            stop being echoes of the source and become a self-sustaining wash.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Delay"
+          applies_to:
+            operator: apply_delay_effect
+            requires_params: [feedback]
+          trigger:
+            gte: {path: params.max.apply_delay_effect.feedback, value: 0.85}
+          suggests: implausible
+      exemplars:
+        - verdict: implausible
+          note: >-
+            A delay at 0.95 feedback on a fully open send. The repeats never
+            decay, so the result is a sustained drone that no longer tracks the
+            part it was fed.
+        - verdict: plausible
+          note: >-
+            The same 0.95 feedback with the return tucked at 0.2 under a dry
+            signal at unity. The regeneration is there but sits far enough below
+            the source to read as depth rather than as a squall.
+        - verdict: unclear
+          note: >-
+            A 2 Hz, 0.62-depth chorus on a sustained pad. Whether that warbles
+            or shimmers depends on the pad's own movement, which is not in the
+            graph.
+      max_tokens: 448
+
+    # ------------------------------------------------------------------
+    # Stylistic congruity between the caption and the edit.
+    #
+    # Two families: axis rules, where the caption pins a property the edit moves
+    # the other way, and era signatures, where the effect itself carries a
+    # period the caption contradicts.
+    #
+    # Scope honestly. recipes.yaml ALREADY gates several recipes on genre
+    # through this same DSL -- target_space_send_synced excludes classical and
+    # folk outright -- so on clips whose genre was mined successfully this
+    # criterion largely re-adjudicates a constraint the planner enforced. Where
+    # it earns its keep is the complement: clips where genre mining found
+    # nothing, so every `not contains_any` gate passed vacuously, while the
+    # caption says something the seven-genre whitelist never had a word for.
+    # ------------------------------------------------------------------
+    - id: stylistic
+      produces: [stylistic]
+      per: row
+      output: enum
+      values: [appropriate, inappropriate, unclear]
+      default_verdict: appropriate
+      # No caption, no judgement. Reported as unclear with reason `no_caption`
+      # rather than waved through as appropriate.
+      requires: [caption]
+      system_prompt: >-
+        You are a record producer shown a description of a piece of music and an
+        edit someone proposes making to it. You say whether the edit suits the
+        music as described. You are asked only about extreme mismatch, not
+        taste: an unusual choice is not a wrong one, and a deliberate clash is a
+        legitimate move that records have always made. You flag the edit that
+        fights what the description says the music already is.
+      rules:
+        - >-
+          Quote the words in the description you are relying on. A mismatch you
+          cannot anchor in the caption is not a mismatch.
+        - >-
+          Answer inappropriate only when the edit contradicts a property the
+          caption states, and does so at a magnitude a listener would notice.
+          Mild anything is appropriate.
+        - >-
+          An effect carrying a period signature is not wrong merely for being
+          anachronistic. Say inappropriate only when the caption places the
+          music somewhere that signature would actively fight.
+        - >-
+          Answer unclear when the caption is silent on the property the rule
+          concerns, or describes the recording rather than the music.
+        - >-
+          The caption describes the clip; it does not inventory it. Something
+          the caption fails to mention is not thereby absent.
+        - >-
+          Give exactly one sentence of justification, quoting the words from the
+          description you relied on. It is read next to the verdict in a table,
+          so a paragraph is worse than a sentence.
+      axis_rules:
+        - id: space_vs_dry_caption
+          statement: >-
+            Any reverb makes a signal sound as if it were coming from a
+            distance, so a caption describing a dry, close or intimate sound is
+            describing the absence of exactly that. A large space brought up to
+            an audible level contradicts it.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb; Sound on Sound -- Effects"
+          # `room_size` x `return_level`. return_level's own hint in param_bands
+          # calls it "the single strongest cue for how audible the effect is",
+          # and it is still the strongest SINGLE cue -- but it is no longer the
+          # only one. The fitted priors gave the reverb its own wet/dry blend
+          # (wet_level 0.3-0.8, dry_level 0.5-1.0) on top of the send levels, so
+          # how loud the effect really is now multiplies send_level, the
+          # reverb's own wet_level, and return_level.
+          #
+          # Left as a single-cue gate on purpose: a trigger decides whether to
+          # spend a judge call, not what the verdict is, so it is meant to be
+          # slightly over-inclusive. Adding the other factors to this `all`
+          # would make it stricter and start missing real cases.
+          trigger:
+            all:
+              - eq: {path: caption.dry, value: true}
+              - not: {eq: {path: caption.reverberant, value: true}}
+              - gte: {path: params.max.apply_reverb_effect.room_size, value: 0.625}
+              - gte: {path: params.send.max.send_return.return_level, value: 0.725}
+          suggests: inappropriate
+
+        - id: fidelity_vs_pristine_caption
+          statement: >-
+            Injecting mains hum or low-frequency rumble into a recording the
+            caption calls clean, professional or high quality contradicts the
+            one thing the description asserts about it.
+          source: "Sound on Sound -- Effects; MusicRadar -- The Ultimate Guide To Effects: Distortion"
+          # The sharpest axis rule here: the plan side is exact rather than
+          # inferred. It reads `plan.poison_tags` and NOT `profile.tags`,
+          # because a poisoned plan carries its degradation in a separate
+          # `poison_graph_spec` -- the clean `graph_spec` the profile is built
+          # from never mentions it, so a profile-tag test would silently never
+          # fire.
+          trigger:
+            all:
+              - eq: {path: caption.pristine, value: true}
+              - contains_any: {path: plan.poison_tags, values: [poison]}
+          suggests: inappropriate
+
+        - id: width_vs_mono_caption
+          statement: >-
+            To pinpoint the placement of something in a mix you want a mono
+            rather than a stereo reverb, because a wide stereo return smears the
+            position the source occupied.
+          source: "Sound on Sound -- Effects: All You Need To Know (And A Little Bit More)"
+          # This trigger used to be vacuous, because every motif pinned `width`
+          # to 1.0 and so every reverb was maximally wide. The fitted priors now
+          # sample it over 0.5-1.0, so the leaf discriminates: a reverb at 0.55
+          # is genuinely narrower than one at 1.0, and only the wide end
+          # actually smears a mono source's position.
+          trigger:
+            all:
+              - eq: {path: caption.mono, value: true}
+              # 0.84 is the bottom edge of width's top band, the "wide,
+              # full-width" one. Not 1.0: a continuous uniform never lands
+              # exactly on its endpoint, so that threshold could never fire --
+              # which is what the reachability report reported it as.
+              - gte: {path: params.max.apply_reverb_effect.width, value: 0.84}
+          suggests: inappropriate
+
+        - id: density_vs_dense_caption
+          statement: >-
+            Big washy reverbs tend to make things sound muddy, and a dense
+            arrangement has no room left to fill. A large space with a bright,
+            slow-decaying tail on an already-crowded mix removes definition
+            rather than adding depth.
+          source: "Sound on Sound -- Effects; MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          # Low damping is the washy end: param_bands glosses it "Low damping
+          # rings out bright; high damping soaks up the top end."
+          trigger:
+            all:
+              - eq: {path: caption.dense, value: true}
+              - gte: {path: params.max.apply_reverb_effect.room_size, value: 0.625}
+              - lte: {path: params.max.apply_reverb_effect.damping, value: 0.4}
+          suggests: inappropriate
+
+        - id: low_end_reverb
+          statement: >-
+            You do not add much, if any, reverb to low-frequency sources such as
+            bass guitar or kick drums. Where a low source does need space, a
+            short ambience works where a big washy reverb turns muddy.
+          source: "Sound on Sound -- Effects: All You Need To Know (And A Little Bit More)"
+          trigger:
+            all:
+              - eq: {path: plan.target_family, value: bass}
+              - gte: {path: params.max.apply_reverb_effect.room_size, value: 0.375}
+          suggests: inappropriate
+      era_signatures:
+        # `periods` and `genres` are what the signature belongs to. The judge
+        # flags only when the caption places the music outside both.
+        - id: spring_reverb_retro
+          signature: Spring reverb
+          statement: >-
+            Spring reverb is the metallic, markedly unnatural sound built into
+            guitar combo amps, and reads as retro -- riding the current wave of
+            nostalgia for all things retro.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          periods: [sixties, seventies, retro]
+          genres: [rock, surf, folk]
+          detect:
+            eq: {path: params.max.apply_reverb_effect.reverb_type, value: spring}
+
+        - id: plate_reverb_classic
+          signature: Plate reverb
+          statement: >-
+            Plate reverb is the classic studio vocal sound: not terribly
+            natural, but it does not wash the vocal in syrupy ambience and
+            instead lets it keep some of its clarity.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          periods: [classic, sixties, seventies]
+          genres: [pop, rock, soul]
+          detect:
+            eq: {path: params.max.apply_reverb_effect.reverb_type, value: plate}
+
+        - id: gated_reverb_eighties
+          signature: Gated reverb
+          statement: >-
+            The gated reverb of Phil Collins' snare is a specific and
+            unmistakable mid-eighties production signature.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          periods: [eighties]
+          genres: [pop, rock]
+          detect:
+            eq: {path: params.max.apply_reverb_effect.reverb_type, value: gated}
+
+        - id: convolution_reverb_modern
+          signature: Convolution reverb
+          statement: >-
+            Convolution reverb recreates the response of a real space from a
+            recording of it, uncannily realistically, and reads as a modern,
+            software-era sound.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          periods: [modern, contemporary]
+          genres: []
+          detect:
+            eq: {path: params.max.apply_reverb_effect.reverb_type, value: convolution}
+
+        - id: slapback_early_rocknroll
+          signature: Slapback echo
+          statement: >-
+            A single short echo around 100ms and up is the classic slapback of
+            early rock and roll, the Elvis and Buddy Holly sound. Under 50ms it
+            stops being an echo and simulates double-tracking instead.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Delay"
+          periods: [fifties, sixties, retro]
+          genres: [rock, rockabilly, country]
+          detect:
+            all:
+              - lte: {path: params.max.apply_delay_effect.delay_seconds, value: 0.185}
+              - lte: {path: params.max.apply_delay_effect.feedback, value: 0.09}
+
+        - id: dub_self_oscillating_echo
+          signature: Self-oscillating feedback echo
+          statement: >-
+            Feedback pushed toward self-oscillation, so the echoes compound into
+            a wash, is the dub signature.
+          source: "Sound on Sound -- Effects; MusicRadar -- The Ultimate Guide To Effects: Delay"
+          periods: [seventies, eighties, contemporary]
+          genres: [dub, reggae, electronic]
+          detect:
+            gte: {path: params.max.apply_delay_effect.feedback, value: 0.75}
+
+        - id: dotted_eighth_delay_trance
+          signature: Three-sixteenth-note delay
+          statement: >-
+            The three-16th-note delay duration is very common in trance music.
+          source: "Sound on Sound -- Effects: All You Need To Know (And A Little Bit More)"
+          periods: [contemporary]
+          genres: [electronic, trance, dance]
+          # `beats` does not survive into the graph: the motif resolves
+          # delay_seconds = (60 / bpm) * beats, coalescing bpm to a literal
+          # 120.0 when the clip has no tempo, which for MusicCaps is always. The
+          # context builder inverts that with the same coalesce, so this reads a
+          # DERIVED value and is only as good as the tempo the manifest reports
+          # matching the one the planner saw.
+          #
+          # The `synced_delay` gate is load-bearing, not decoration: the
+          # free-time variant samples seconds from uniform 0.12-0.75, and a free
+          # 0.375s delay is otherwise indistinguishable from this.
+          #
+          # Expect this to fire often. 0.75 beats carries the highest weight in
+          # the synced support, so it is the modal setting rather than an
+          # unusual one, and the caption gate is what has to discriminate.
+          detect:
+            all:
+              - contains_any: {path: plan.recipe_tags, values: [synced_delay]}
+              - gte: {path: derived.delay_beats, value: 0.74}
+              - lte: {path: derived.delay_beats, value: 0.76}
+
+        - id: phaser_psych_funk
+          signature: Phaser
+          statement: >-
+            The phaser's swirling, sweeping movement across the frequency
+            spectrum is primarily a psychedelic rock and funk effect.
+          source: "MusicRadar -- The Ultimate Guide To Modulation Effects"
+          periods: [sixties, seventies]
+          genres: [rock, funk, psychedelic]
+          # Dormant for a reason worth distinguishing from a narrow
+          # distribution: apply_phaser_effect is declared in operators.yaml but
+          # referenced by no motif and no recipe, so a phaser cannot appear in
+          # any plan. param_bands.yaml carries a context_overlay keyed on the
+          # `phaser` tag that has the same problem and can never fire either.
+          detect:
+            contains_any: {path: profile.operators, values: [apply_phaser_effect]}
+
+        - id: chorus_eighties
+          signature: Chorus
+          statement: >-
+            Lush, obvious chorus on guitars and keys is a 1980s production
+            signature.
+          source: "MusicRadar -- The Ultimate Guide To Modulation Effects"
+          periods: [eighties]
+          genres: [pop, rock, electronic]
+          detect:
+            gte: {path: params.max.apply_chorus_effect.mix, value: 0.325}
+
+        - id: flanger_classic_rock
+          signature: Flanger
+          statement: >-
+            Through-zero flanging is the classic-rock jet-plane sweep of Pink
+            Floyd, The Police and Van Halen. It is a delay of up to about 10ms,
+            where chorus sits between 20 and 50ms.
+          source: "MusicRadar -- The Ultimate Guide To Modulation Effects"
+          periods: [seventies, eighties]
+          genres: [rock]
+          # There is no flanger operator, so this cannot fire.
+          #
+          # It used to be worth noting that the chorus motif pinned
+          # centre_delay_ms to 7.0, which by the delay times above is flanger
+          # territory rather than chorus territory. The fitted priors fixed
+          # that: centre_delay_ms now samples 20-50 ms, exactly the chorus range
+          # the source gives. A chorus plan is now really a chorus.
+          detect:
+            contains_any: {path: profile.operators, values: [apply_flanger_effect]}
+
+        - id: bitcrush_hiphop_chiptune
+          signature: Bit reduction
+          statement: >-
+            The harsh, gritty sound of ancient 8-bit samplers shaped the
+            evolution of hip-hop, and bit reduction suits urban and chip-tune
+            styles.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Distortion"
+          periods: [eighties, nineties, contemporary]
+          genres: [hiphop, electronic, chiptune]
+          detect:
+            contains_any: {path: profile.operators, values: [apply_bitcrush_effect]}
+
+        - id: resonant_sweep_acid_house
+          signature: Resonant filter sweep
+          statement: >-
+            Resonant filter sweeps are what make otherwise lifeless or
+            repetitive sounds move, and the TB-303's 18dB slope is the acid
+            sound. The technique belongs to house, drum and bass and electronic
+            production.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Filters"
+          periods: [eighties, nineties, contemporary]
+          genres: [electronic, house, acid, dnb]
+          detect:
+            gte: {path: params.max.apply_lowpass_filter.resonance, value: 0.7}
+
+        - id: huge_reverb_dubstep
+          signature: Huge reverb soundscape
+          statement: >-
+            Enormous reverb soundscapes, of the kind artists such as Nero build,
+            are a deliberate contemporary bass-music signature rather than a
+            mixing accident.
+          source: "MusicRadar -- The Ultimate Guide To Effects: Reverb"
+          periods: [contemporary]
+          genres: [electronic, dubstep, ambient]
+          detect:
+            all:
+              - gte: {path: params.max.apply_reverb_effect.room_size, value: 0.85}
+              - gte: {path: params.send.max.send_return.return_level, value: 0.725}
+
+        - id: drastic_band_limiting
+          signature: Drastic band-limiting
+          statement: >-
+            A drastically equalised signal with only a narrow range of
+            frequencies preserved is the Wish You Were Here sound, and is still
+            used in dance music.
+          source: "MusicRadar -- The Ultimate Guide To Effects: EQ"
+          periods: [seventies, contemporary]
+          genres: [rock, electronic, dance]
+          # Scoped to the `chain` blocks on purpose. Narrowing a reverb's wet
+          # return with a highpass at 700Hz and a lowpass at 3000Hz is ordinary
+          # practice and says nothing about the record; narrowing the signal
+          # ITSELF is the signature. Only block provenance separates the two,
+          # which is why ChainParam carries it.
+          detect:
+            all:
+              - gte: {path: params.chain.max.apply_highpass_filter.cutoff_frequency_hz, value: 300.0}
+              - lte: {path: params.chain.min.apply_lowpass_filter.cutoff_frequency_hz, value: 4000.0}
+      exemplars:
+        - verdict: inappropriate
+          note: >-
+            Caption "a dry, close-miked solo acoustic guitar, intimate and
+            unprocessed" against a cavernous reverb pushed level with the dry
+            signal. The description's whole content is the absence of that
+            space.
+        - verdict: appropriate
+          note: >-
+            Caption "a dreamy, washed-out synth pad with long decaying tails"
+            against a large reverb at a strong return. The edit extends
+            something the caption already reports, so it is a deepening rather
+            than a contradiction.
+        - verdict: appropriate
+          note: >-
+            Caption "an energetic electronic dance track" against a
+            dotted-eighth synced delay. The signature and the caption agree, so
+            a fired trigger is not a mismatch.
+        - verdict: unclear
+          note: >-
+            Caption "a low quality recording of a live band" against a large
+            reverb. The caption describes the recording, not the space, and says
+            nothing about how close the band sounds.
+      max_tokens: 512

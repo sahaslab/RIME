@@ -61,6 +61,10 @@ levels:
       parameter_values: exact
       operator_order: preserve
     rules:
+      - >-
+        Write it the way a producer would say it out loud. Never use function
+        names, internal stem or bus names, or code punctuation, and give each
+        value at the precision shown rather than to more decimal places.
       - Name every effect explicitly.
       - Name the stem the chain is applied to.
       - State every parameter value exactly as given, with its units.
@@ -76,6 +80,17 @@ levels:
         low-pass it at 3000Hz, then bring the return back up at 1.15.
     checks:
       hard:
+        # A backstop, not the mechanism: this level is now handed a written
+        # chain summary rather than the symbolic graph, so there is nothing
+        # left to copy. Every leaked token measured in the corpus carried an
+        # underscore -- gain_db, target_stem, separate_audio, processed_stem --
+        # and no instruction a person writes contains one. Hyphens are
+        # untouched, so "high-pass" and "room-size" still read normally.
+        forbid_patterns:
+          - '_'
+          - '->'
+          - '[{}\[\]]'
+          - '=\s*["\-\d]'
         must_contain_all_param_values: true
         must_mention_stems: true
       rubric:
@@ -120,13 +135,44 @@ levels:
         forbid_patterns:
           - '\d'
           - '(?i)\b(ms|hz|khz|db|bpm)\b'
-        must_mention_operators: true
+          - '_'
+          - '->'
+          - '[{}\[\]]'
         must_mention_stems: true
-        # Naming every wet-path filter is faithful to the rule above but is the
-        # main source of retries on band-limited send chains. Add operator tags
-        # here to stop requiring them, e.g. `mention_exempt_tags: [eq_pass]`.
+        # `must_mention_operators` is deliberately OFF here, and the rubric item
+        # below carries the requirement instead.
+        #
+        # Whether an operator has been named is not a question a regex can
+        # settle, which is the line this file draws between `hard` and `rubric`.
+        # The check compares against a fixed alias list, so it rejected text
+        # that names the processor perfectly well in a working musician's words
+        # -- which is precisely what this level asks for:
+        #
+        #   "pull it back with a dramatic trim"          -> apply_gain not named
+        #   "filter it with a subsonic low-cut"          -> apply_highpass not named
+        #   "keep only the bright, crisp air and let
+        #    the muffled lows fade"                      -> apply_lowpass not named
+        #
+        # Trim IS the word for a gain move; low-cut IS a high-pass. The alias
+        # list cannot be completed, either: `trim` was excluded from it on
+        # purpose because the shelf and peak filters earn it equally through
+        # their own gain_db, so adding it would just move the false positives.
+        #
+        # Measured over 999 rows of the MusicCaps artifact, AL1 passes 11% with
+        # the check and 98% without it, and it is the ONLY failure on 868 of
+        # those rows. It was rejecting the target behaviour at scale.
+        #
+        # Set it back to true for a run that needs the literal check; the alias
+        # table in param_bands.yaml (`operator_names`) is inert while it is off,
+        # but is still validated against the registry and is one line from use.
       rubric:
-        - Every operator in the graph is named or unambiguously implied.
+        - >-
+          Every operator in the graph is named or unambiguously implied. A
+          common word for what the processor does counts, and so does an
+          accurate description of its audible effect: "trim" or "pull it back"
+          for gain, "low-cut" for a high-pass, "keep only the top and let the
+          lows fade" for a low-pass. Judge whether a musician reading this would
+          know what was done, not whether a particular word appears.
         - >-
           Each parameter's descriptor lands in the band the graph actually
           specifies.
@@ -170,7 +216,23 @@ levels:
         forbid_patterns:
           - '\d'
           - '(?i)\b(ms|hz|khz|db|bpm)\b'
-        max_words: 24
+          - '_'
+          - '->'
+          - '[{}\[\]]'
+        # `max_words: 24` was removed here by request. The measurement that put
+        # it in is worth keeping, because it says what to watch now that the
+        # gate is gone: of 1000 AL2 texts, 154 overran, and the over-limit and
+        # within-limit groups had the SAME median chain complexity -- 11 steps
+        # each -- while their word counts differed two-fold, 33 against 18. The
+        # limit was never too tight for complex chains. What the overruns were
+        # doing is enumerating instead of summarizing: "adds a subtle swirling
+        # chorus, and wraps it in a cavernous, dreamy reverb" lists processors,
+        # where a passing text on the same chain said "a subtle, warm,
+        # swirling, cavernous shimmer".
+        #
+        # So enumeration is no longer caught mechanically. The rubric item
+        # "Reads as an intent rather than as a list of processors" is now the
+        # only thing standing against it, and it needs a judge to enforce.
         must_mention_stems: true
       rubric:
         - Conveys the overall sonic character of the chain.
