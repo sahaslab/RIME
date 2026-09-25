@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -6,8 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ground_truth.datasets import available_dataset_names, build_analysis_manifest
 from ground_truth.io_utils import write_jsonl
 
-# MusicCaps lives outside the repo, in the shared lab corpus.
-MUSICCAPS_ROOT = Path("/dartfs/rc/lab/S/SinghN/shared/musiccaps")
+# MusicCaps lives outside the repo, in a shared corpus directory. Point
+# RIME_MUSICCAPS_ROOT at your own copy; the default assumes a sibling of the
+# repo so a fresh clone runs without editing this file.
+MUSICCAPS_ROOT = Path(os.environ.get("RIME_MUSICCAPS_ROOT", "data/shared/musiccaps")).expanduser()
 
 
 def main():

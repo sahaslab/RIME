@@ -12,6 +12,7 @@ that already fired, and is handed their statements, their sources and the actual
 parameter values, so it never has to do arithmetic.
 """
 
+import os
 import re
 import json
 from pathlib import Path
@@ -156,7 +157,7 @@ class MertSimilarityConfig:
     model: str = "MERT-v1-95M"
     # "all" means mean over the layer stack; an int takes that layer alone. 12
     # reproduces an unmodified fadtk.MERTModel(), which is the setting under
-    # which these numbers are comparable to the lab's existing FAD/KAD run.
+    # which these numbers are comparable to a standard FAD/KAD run.
     layer: str = "all"
     device: str | None = None
     render_manifest: Path | None = None
@@ -449,18 +450,29 @@ def _validate_rule_paths(config: RejectionConfig, config_path: Path) -> None:
         raise ValueError("Rejection config '%s' has unusable rule paths:\n  %s" % (config_path, "\n  ".join(problems)))
 
 
+def _expand_path(value: object) -> Path:
+    """A configured path with ~ and ${VAR} resolved.
+
+    Corpora live outside the repo and land in a different place on every
+    machine, so the configs name them by variable rather than by absolute
+    path. An unset variable is left verbatim, which surfaces as a missing
+    file naming the variable rather than as a silent empty read.
+    """
+    return Path(os.path.expandvars(str(value))).expanduser()
+
+
 def _required_path(paths: Mapping[str, Any], key: str, config_path: Path) -> Path:
     value = paths.get(key)
     if not value:
         raise ValueError("Rejection config '%s' is missing paths.%s." % (config_path, key))
-    return Path(str(value)).expanduser()
+    return _expand_path(value)
 
 
 def _optional_path(paths: Mapping[str, Any], key: str) -> Path | None:
     value = paths.get(key)
     if not value:
         return None
-    return Path(str(value)).expanduser()
+    return _expand_path(value)
 
 
 # --------------------------------------------------------------------------

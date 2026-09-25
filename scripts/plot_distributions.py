@@ -13,6 +13,7 @@ Rendering is fully deterministic: every kind is drawn from its declared weights 
 closed-form density, so no RNG is involved and the PDFs are byte-reproducible across runs.
 """
 
+import os
 import math
 import argparse
 from pathlib import Path
@@ -27,7 +28,7 @@ from matplotlib.axes import Axes
 from tqdm.auto import tqdm
 
 CONFIG_DIR = Path("configs/ground_truth")
-OUTPUT_DIR = Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/figures/distribution_priors")
+OUTPUT_DIR = Path(os.environ.get("RIME_ARTIFACTS_ROOT", "derived")).expanduser() / "figures/distribution_priors"
 
 # One series per subplot, so a single categorical slot is all that is needed. Landmarks and
 # text wear ink tokens rather than a second hue: status colors stay reserved for status.

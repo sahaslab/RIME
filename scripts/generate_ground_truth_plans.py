@@ -123,7 +123,11 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     if WORKER_PLANNER is None:
         raise RuntimeError("Worker planner was not initialized.")
 
-    plan_seed = stable_seed(record.get("clip_id"), record.get("audio_path"), WORKER_SEED)
+    # Seeded on clip_id alone, matching prepare_mtg_jamendo_validation_subset.
+    # audio_path is deliberately excluded: it is absolute and machine-specific,
+    # so folding it in would hand two people running the same manifest two
+    # different plan sets.
+    plan_seed = stable_seed(record.get("clip_id"), WORKER_SEED)
     plans = WORKER_PLANNER.plan(
         metadata=record,
         mode=WORKER_PLANNER_MODE,
@@ -135,7 +139,7 @@ def build_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
         WORKER_PLANNER.random_plans(
             metadata=record,
             count=WORKER_RANDOM_PLANS_PER_CLIP,
-            seed=stable_seed(record.get("clip_id"), record.get("audio_path"), "random", WORKER_SEED),
+            seed=stable_seed(record.get("clip_id"), "random", WORKER_SEED),
         )
     )
     analysis = dict(record.get("analysis", {}))

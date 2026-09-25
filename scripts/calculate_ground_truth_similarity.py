@@ -57,8 +57,8 @@ DEFAULT_CONFIG_DIR = Path("configs/ground_truth")
 MERT_SAMPLE_RATE = 24000
 
 # fadtk resamples with these exact settings in FrechetAudioDistance.load_audio.
-# Matched so a `layer: 12` run is comparable to the lab's existing FAD/KAD
-# numbers rather than differing by an interpolation filter.
+# Matched so a `layer: 12` run is comparable to standard FAD/KAD numbers
+# rather than differing by an interpolation filter.
 RESAMPLE_KWARGS = {
     "lowpass_filter_width": 64,
     "rolloff": 0.9475937167399596,
@@ -245,9 +245,9 @@ class PooledMertModel:
 
     Subclassing rather than reimplementing keeps the checkpoint, the
     Wav2Vec2FeatureExtractor, the device placement and the six-minute truncation
-    exactly as the lab's existing analysis has them. The only thing overridden
-    is which hidden states survive: fadtk selects a single layer
-    (`out = out[self.layer]`), and the default here averages the whole stack.
+    exactly as fadtk has them. The only thing overridden is which hidden
+    states survive: fadtk selects a single layer (`out = out[self.layer]`),
+    and the default here averages the whole stack.
 
     Setting `layer: 12` makes this behave as an unmodified `fadtk.MERTModel()`,
     which is what lets the two sets of numbers be compared.
@@ -389,7 +389,7 @@ class CachedEmbedder:
 
 
 def cosine_similarity(first: Any, second: Any) -> float:
-    """Cosine between two pooled embeddings, matching the lab's own metric."""
+    """Cosine between two pooled embeddings, matching the reference metric."""
     import numpy as np
 
     a = np.asarray(first, dtype=np.float64).ravel()

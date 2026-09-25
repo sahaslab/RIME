@@ -1,9 +1,12 @@
+import os
 import json
 import random 
 from pathlib import Path
 
-BASE_PATH = '/dartfs-hpc/rc/home/t/f00814t/lab/shared/musiccaps/rime-metadata/musiccaps_analysis_manifest.jsonl'
-WRITE_PATH = '/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/manifests'
+SHARED_ROOT = Path(os.environ.get("RIME_SHARED_ROOT", "data/shared")).expanduser()
+ARTIFACTS_ROOT = Path(os.environ.get("RIME_ARTIFACTS_ROOT", "derived")).expanduser()
+BASE_PATH = SHARED_ROOT / "musiccaps/rime-metadata/musiccaps_analysis_manifest.jsonl"
+WRITE_PATH = ARTIFACTS_ROOT / "manifests"
  
 def write_jsonl(path, records):
     with open(path, "w", encoding="utf-8") as f:
@@ -44,6 +47,7 @@ if __name__ == "__main__":
     random.seed(18261)
     train,valid = filter_and_sample(BASE_PATH,399)
     out_dir = Path(WRITE_PATH)
+    out_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(out_dir / "musiccaps_analysis_manifest.jsonl", train)
     write_jsonl(out_dir / "musiccaps_heldout_analysis_manifest.jsonl", valid)
 

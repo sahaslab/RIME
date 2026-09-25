@@ -19,6 +19,7 @@ See configs/ground_truth/refs/ for the Nunes & Ordanini paper, and the emitted
 configs/ground_truth/stem_priors.yaml header for the full method write-up.
 """
 
+import os
 import sys
 import json
 import math
@@ -34,8 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ground_truth.datasets import load_dataset_config
 from ground_truth.io_utils import load_records
 
-# MusicCaps and MoisesDB both live outside the repo, in the shared lab corpus.
-SHARED_ROOT = Path("/dartfs/rc/lab/S/SinghN/shared")
+# MusicCaps and MoisesDB both live outside the repo, in a shared corpus
+# directory. Point RIME_SHARED_ROOT at your own copy.
+SHARED_ROOT = Path(os.environ.get("RIME_SHARED_ROOT", "data/shared")).expanduser()
 MUSICCAPS_MANIFEST = SHARED_ROOT / "musiccaps/rime-metadata/musiccaps_analysis_manifest.jsonl"
 MOISESDB_ZIP = SHARED_ROOT / "moisesdb.zip"
 

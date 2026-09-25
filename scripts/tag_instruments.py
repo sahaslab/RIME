@@ -33,6 +33,7 @@ Examples:
 """
 
 from __future__ import annotations
+import os
 import ast
 import sys
 import json
@@ -46,7 +47,9 @@ from ground_truth.datasets import load_dataset_config, build_manifest_row
 from ground_truth.instrument_vocab import dedupe, normalize_instrument_tags
 
 DEFAULT_MODEL_ID = "nvidia/music-flamingo-hf"
-DEFAULT_CACHE_DIR = "/dartfs/rc/lab/S/SinghN/noah/.cache/huggingface/hub"
+# Unset means the standard Hugging Face resolution order: HF_HOME, then
+# HUGGINGFACE_HUB_CACHE, then ~/.cache/huggingface.
+DEFAULT_CACHE_DIR = os.environ.get("RIME_HF_CACHE_DIR") or None
 DEFAULT_DATASET_CONFIG = Path("configs/ground_truth/datasets/mtg_jamendo.yaml")
 DEFAULT_OUTPUT_PATH = Path("derived/ground_truth/tagged_analysis_manifest.jsonl")
 DEFAULT_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus")
@@ -485,7 +488,7 @@ def main() -> None:
     print("Tagging %d clip(s) with %s -> %s (%s format)" % (len(clips), args.model_id, args.output, args.format))
     tagger = InstrumentTagger(
         model_id=args.model_id,
-        cache_dir=None if args.cache_dir.lower() == "none" else args.cache_dir,
+        cache_dir=None if (args.cache_dir or "none").lower() == "none" else args.cache_dir,
         dtype=args.dtype,
         device_map=args.device_map,
         max_new_tokens=args.max_new_tokens

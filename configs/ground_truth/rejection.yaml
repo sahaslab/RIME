@@ -91,7 +91,7 @@ rejection:
     # production language stripped out. Without this the judge sees
     # "slide guitar, blues, guitar layers" where the caption said "a distant
     # filtered vocal hum ... from another room" -- and `distant` is a space cue.
-    captions: /dartfs/rc/lab/S/SinghN/shared/musiccaps/musiccaps_captions.csv
+    captions: ${RIME_SHARED_ROOT}/musiccaps/musiccaps_captions.csv
     output: derived/ground_truth/rejection_report.jsonl
     # Rows needing a human. Optional; unset means they stay only in `output`.
     review: derived/ground_truth/rejection_review.jsonl
@@ -136,9 +136,8 @@ rejection:
     # takes that layer alone.
     #
     # Setting this to 12 reproduces an unmodified fadtk.MERTModel() exactly,
-    # which matters: the lab's existing FAD/KAD analysis under
-    # /dartfs/rc/lab/S/SinghN/rime/rime_analysis is single-layer at 12, so 12 is
-    # the setting under which these numbers and those are comparable.
+    # which matters: a standard FAD/KAD analysis is single-layer at 12, so 12
+    # is the setting under which these numbers and those are comparable.
     layer: all
 
     # Null autodetects cuda, falling back to cpu.

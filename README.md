@@ -39,6 +39,29 @@ Default outputs:
 - `derived/ground_truth/subsampled_plans.jsonl`
 - `derived/ground_truth/plan_coverage.json`
 
+### Corpus And Artifact Locations
+
+Audio corpora and generated artifacts live outside the repo, so the paths to
+them are environment variables rather than literals. Every one has a working
+in-repo default, so a fresh clone runs with none of them set. Copy
+`.env.example` to `.env` to point them elsewhere:
+
+| Variable | Default | Used for |
+| --- | --- | --- |
+| `RIME_SHARED_ROOT` | `data/shared` | MusicCaps metadata/captions, `moisesdb.zip` |
+| `RIME_MUSICCAPS_ROOT` | `data/shared/musiccaps` | MusicCaps audio for the analysis manifest |
+| `RIME_ARTIFACTS_ROOT` | `derived` | rendered audio, plan JSONL, figures |
+| `RIME_HF_CACHE_DIR` | unset | Hugging Face cache for `tag_instruments.py` |
+
+`configs/ground_truth/rejection.yaml` refers to them as `${RIME_SHARED_ROOT}`;
+config paths are expanded with `os.path.expandvars`, so an unset variable
+surfaces as a missing file naming the variable rather than a silent empty read.
+
+The committed `data/ground_truth/musiccaps_analysis_manifest.jsonl` stores
+`audio_path` relative to the MusicCaps audio root. It drives the symbolic
+reproduction pipeline, which never opens the audio. To work with real audio,
+regenerate a manifest with `build_analysis_manifest.py --audio-root`.
+
 ## 1. Build The Analysis Manifest
 
 ```bash
@@ -568,8 +591,8 @@ Embedding reuses `fadtk.MERTModel` (`m-a-p/MERT-v1-95M`, 768-dim, 24 kHz),
 already installed in `postmaster-clean`, subclassed to replace only the pooling.
 `layer: all` averages the 13-layer stack then the time axis; `layer: 12`
 reproduces an unmodified `fadtk.MERTModel()` **bit-exactly**, which is the
-setting under which these numbers are comparable to the lab's existing FAD/KAD
-analysis under `/dartfs/rc/lab/S/SinghN/rime/rime_analysis`.
+setting under which these numbers are comparable to a standard single-layer
+FAD/KAD analysis.
 
 Which "original" is used matters, and the render manifest carries three:
 

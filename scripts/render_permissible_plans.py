@@ -14,6 +14,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Rendered audio and plan artifacts live outside the repo. Point
+# RIME_ARTIFACTS_ROOT at wherever yours are written.
+ARTIFACTS_ROOT = Path(os.environ.get("RIME_ARTIFACTS_ROOT", "derived")).expanduser()
+
 
 def format_seconds(value: float) -> str:
     return f"{value:.1f}s"
@@ -653,13 +657,13 @@ def main() -> None:
     parser.add_argument(
         "--plans-path",
         type=Path,
-        default=Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/plans/musiccaps_subsampled_plans.jsonl"),
+        default=ARTIFACTS_ROOT / "plans/musiccaps_subsampled_plans.jsonl",
         help="Input JSONL of permissible plans. Default: %(default)s",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/dartfs/rc/lab/S/SinghN/projects/rime_artifacts/audio"),
+        default=ARTIFACTS_ROOT / "audio",
         help="Root directory for rendered audio. Default: %(default)s",
     )
     parser.add_argument(
